@@ -5,6 +5,7 @@ mod input;
 mod modals;
 mod render;
 mod state;
+pub(super) mod theme;
 
 use std::collections::{HashMap, HashSet};
 use std::io::stdout;
@@ -22,22 +23,22 @@ use crossterm::event::{
 use crossterm::execute;
 use native_db::Database;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 use tokio::task::spawn_blocking;
 
-use crate::db::*;
-use crate::feed;
-use crate::output::time_ago;
+use crate::shared::db::*;
+use crate::shared::feed;
+use crate::shared::output::time_ago;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const AUTO_SYNC_INTERVAL: Duration = Duration::from_secs(300);
 const FLASH_TTL: Duration = Duration::from_secs(8);
 const DOUBLE_CLICK_TTL: Duration = Duration::from_millis(450);
 
-use crate::db::FeedStatsEntry as FeedStats;
+use crate::shared::db::FeedStatsEntry as FeedStats;
 
 #[derive(Clone)]
 pub(super) struct BrowserData {
@@ -49,6 +50,10 @@ pub(super) struct BrowserData {
     pub(super) feed_stats: HashMap<String, FeedStats>,
     pub(super) total_unread: usize,
     pub(super) total_starred: usize,
+    pub(super) mute_filters: Vec<MuteFilter>,
+    pub(super) boards: Vec<Board>,
+    pub(super) board_items: Vec<BoardItem>,
+    pub(super) watches: Vec<SavedSearch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -58,6 +63,10 @@ pub(super) enum SidebarKind {
     Uncategorized,
     Folder(String),
     Feed(String),
+    ReadLater,
+    RecentlyRead,
+    Board(String),
+    Watch(String),
 }
 
 pub(super) struct SidebarEntry {
@@ -65,6 +74,8 @@ pub(super) struct SidebarEntry {
     pub(super) label: String,
     pub(super) unread: usize,
     pub(super) depth: usize,
+    pub(super) has_error: bool,
+    pub(super) is_last_child: bool,
 }
 
 #[derive(Clone)]
@@ -93,6 +104,9 @@ pub(super) enum InputPurpose {
     NewFolder { parent_id: Option<String> },
     RenameFolder { folder_id: String },
     EditNote { item_id: String },
+    CreateBoard,
+    ImportOpml,
+    CreateWatch,
 }
 
 pub(super) struct InputField {
@@ -114,6 +128,7 @@ pub(super) enum PickerPurpose {
     FilterByTag,
     FilterByTime,
     ExportItem { item_id: String },
+    AddToBoard { item_id: String },
 }
 
 pub(super) struct PickerEntry {
@@ -131,6 +146,8 @@ pub(super) struct PickerModal {
 pub(super) enum ConfirmAction {
     DeleteFeed { feed_id: String },
     DeleteFolder { folder_id: String, recursive: bool },
+    MarkAllRead { scope: String, scope_id: Option<String> },
+    DeleteBoard { board_id: String },
 }
 
 pub(super) struct ConfirmModal {
@@ -139,6 +156,7 @@ pub(super) struct ConfirmModal {
     pub(super) action: ConfirmAction,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(super) enum AppMessage {
     DataLoaded(Result<BrowserData, String>),
     ActionFinished {
@@ -230,58 +248,38 @@ pub(super) struct App {
     pub(super) last_item_click: Option<LastItemClick>,
     pub(super) layout: Option<UiLayout>,
     pub(super) preview_links: Vec<PreviewLink>,
+    pub(super) theme: theme::Theme,
+    pub(super) collapsed_folders: HashSet<String>,
+    pub(super) visual_mode: bool,
+    pub(super) selected_items: HashSet<String>,
+    pub(super) sort_order: String,
+    pub(super) dedup: bool,
+    pub(super) hover_sidebar: Option<usize>,
+    pub(super) hover_item: Option<usize>,
+    pub(super) hover_link: Option<String>,
 }
 
 impl App {
     fn draw(&mut self, frame: &mut Frame) {
+        let outer = frame.area();
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(2),
+                Constraint::Length(1), // top margin
+                Constraint::Min(1),   // body
+                Constraint::Length(1), // status bar
             ])
-            .split(frame.area());
+            .split(outer);
 
-        let header = areas[0];
         let body = areas[1];
-        let footer = areas[2];
-
-        let (status, is_error) = self.status_text();
-        let filters = format!(
-            "focus:{}  unread:{}  search:{}  tag:{}  since:{}",
-            match self.focus {
-                Focus::Sidebar => "sidebar",
-                Focus::Items => "items",
-                Focus::Preview => "preview",
-            },
-            if self.unread_only { "on" } else { "off" },
-            if self.search_query.is_empty() { "-".to_string() } else { self.search_query.clone() },
-            self.tag_filter.as_deref().unwrap_or("-"),
-            self.since_filter.as_deref().unwrap_or("-"),
-        );
-        let header_line = Line::from(vec![
-            Span::styled("rssdude", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled(
-                status,
-                if is_error {
-                    Style::default().fg(Color::Red)
-                } else {
-                    Style::default().fg(Color::Green)
-                },
-            ),
-            Span::raw("  "),
-            Span::styled(filters, Style::default().fg(Color::DarkGray)),
-        ]);
-        frame.render_widget(Paragraph::new(header_line), header);
+        let status_area = areas[2];
 
         let panes = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(28),
-                Constraint::Percentage(32),
-                Constraint::Percentage(40),
+                Constraint::Percentage(25),
+                Constraint::Percentage(30),
+                Constraint::Percentage(45),
             ])
             .split(body);
 
@@ -300,52 +298,73 @@ impl App {
         self.item_index = helpers::clamp_index(self.item_index, items.len());
 
         self.sidebar_offset = render::draw_sidebar(
-            frame,
-            panes[0],
-            &sidebar_entries,
-            self.sidebar_index,
-            self.sidebar_offset,
-            self.focus,
+            frame, panes[0], &sidebar_entries,
+            self.sidebar_index, self.sidebar_offset,
+            self.focus, &self.theme, &self.collapsed_folders,
+            self.hover_sidebar,
         );
         self.items_offset = render::draw_items(
-            frame,
-            panes[1],
-            &items,
-            self.item_index,
-            self.items_offset,
-            self.focus,
+            frame, panes[1], &items,
+            self.item_index, self.items_offset,
+            self.focus, &self.theme, self.visual_mode, &self.selected_items,
+            self.hover_item,
         );
         self.preview_links = render::draw_preview(
-            frame,
-            panes[2],
-            self.current_item(),
-            self.preview_scroll,
-            self.focus,
+            frame, panes[2], self.current_item(),
+            self.preview_scroll, self.focus, &self.theme,
         );
 
-        let footer_text = "Tab panes  j/k move  Enter open  space read  * star/unstar  N note  / search  u unread  a add feed  n new folder  e rename folder  M move  x delete  X recursive delete  s sync selected feed  r sync all  o open link  double-click item open link  q quit";
-        frame.render_widget(
-            Paragraph::new(Text::from(footer_text))
-                .wrap(Wrap { trim: false })
-                .block(Block::default().borders(Borders::TOP)),
-            footer,
-        );
+        self.draw_status_bar(frame, status_area);
 
-        if self.show_help {
-            render::draw_help_overlay(frame);
-        }
-
+        if self.show_help { render::draw_help_overlay(frame, &self.theme); }
         if let Some(ref lines) = self.digest_content {
-            render::draw_scrollable_overlay(frame, "Digest (Esc close, j/k scroll)", lines, self.digest_scroll);
+            render::draw_scrollable_overlay(frame, "Digest (Esc close, j/k scroll)", lines, self.digest_scroll, &self.theme);
         }
-
         if let Some(ref lines) = self.trending_content {
-            render::draw_scrollable_overlay(frame, "Trending (Esc close, j/k scroll, Enter select)", lines, self.trending_scroll);
+            render::draw_scrollable_overlay(frame, "Trending (Esc close, j/k scroll, Enter select)", lines, self.trending_scroll, &self.theme);
         }
-
         if let Some(modal) = &self.modal {
-            render::draw_modal(frame, modal);
+            render::draw_modal(frame, modal, &self.theme);
         }
+    }
+
+    fn draw_status_bar(&self, frame: &mut Frame, area: Rect) {
+        let theme = &self.theme;
+        let mode_str = if self.visual_mode {
+            format!(" visual ({}) ", self.selected_items.len())
+        } else {
+            " normal ".to_string()
+        };
+        let scope_str = format!(" {} ", self.scope_label());
+        let unread_str = format!(" {} unread ", self.data.as_ref().map(|d| d.total_unread).unwrap_or(0));
+        let right_str = if let Some(ref link) = self.hover_link {
+            format!(" {link} ")
+        } else if let Some(ref sync) = self.syncing {
+            format!(" syncing {}/{} ", sync.completed, sync.total)
+        } else if let Some(ref flash) = self.flash {
+            if flash.at.elapsed() <= FLASH_TTL {
+                format!(" {} ", flash.text)
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let segments = vec![
+            Span::styled(mode_str.clone(), Style::default().bg(theme.status_bg_1).fg(theme.status_fg).add_modifier(Modifier::BOLD)),
+            Span::styled(scope_str, Style::default().bg(theme.status_bg_2).fg(theme.status_fg)),
+            Span::styled(unread_str, Style::default().bg(theme.status_bg_3).fg(theme.status_fg)),
+            Span::styled(right_str, Style::default().bg(theme.status_bg_2).fg(theme.status_fg)),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(segments)), area);
+    }
+
+    fn scope_label(&self) -> String {
+        let entries = self.sidebar_entries();
+        entries.get(self.sidebar_index)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| "All Items".into())
     }
 }
 
@@ -359,8 +378,9 @@ pub async fn run(db: Arc<Database<'static>>) -> Result<()> {
 }
 
 async fn run_app(mut terminal: DefaultTerminal, db: Arc<Database<'static>>) -> Result<()> {
+    let config = crate::shared::config::Config::load().unwrap_or_default();
     let (tx, rx) = channel();
-    let mut app = App::new(db, tx, rx);
+    let mut app = App::new(db, tx, rx, &config.ui.theme);
     app.request_refresh();
     app.start_sync(None);
 

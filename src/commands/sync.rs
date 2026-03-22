@@ -7,9 +7,10 @@ use native_db::Database;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
 
-use crate::db::*;
-use crate::feed;
-use crate::output::*;
+use crate::shared::config::RetentionConfig;
+use crate::shared::db::*;
+use crate::shared::feed;
+use crate::shared::output::*;
 
 // ---------------------------------------------------------------------------
 // Sync
@@ -111,7 +112,16 @@ pub async fn sync_core(db: Arc<Database<'static>>, feed_id: Option<String>) -> R
 
 pub async fn sync(db: Arc<Database<'static>>, json: bool, feed_id: Option<String>) -> Result<()> {
     if !json { println!("Syncing..."); }
-    let result = sync_core(db, feed_id).await?;
+    let result = sync_core(Arc::clone(&db), feed_id).await?;
+
+    // Auto-cleanup
+    let config = crate::shared::config::Config::load().unwrap_or_default();
+    let cleanup = if config.retention.auto_mark_read_after.is_some() || config.retention.auto_delete_after.is_some() {
+        run_cleanup(db, &config.retention).await.ok()
+    } else {
+        None
+    };
+
     if json {
         print_json(&result);
     } else {
@@ -123,8 +133,70 @@ pub async fn sync(db: Arc<Database<'static>>, json: bool, feed_id: Option<String
             }
         }
         println!("Done. {} new items.", result.new_items);
+        if let Some(ref c) = cleanup {
+            if c.marked_read > 0 || c.deleted > 0 {
+                println!("Auto-cleanup: marked {} old items as read, deleted {} expired items.", c.marked_read, c.deleted);
+            }
+        }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Auto-cleanup
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct CleanupResult {
+    pub marked_read: u32,
+    pub deleted: u32,
+}
+
+pub async fn run_cleanup(db: Arc<Database<'static>>, retention: &RetentionConfig) -> Result<CleanupResult> {
+    let mark_after = retention.auto_mark_read_after.as_ref().map(|s| parse_duration(s)).transpose()?;
+    let delete_after = retention.auto_delete_after.as_ref().map(|s| parse_duration(s)).transpose()?;
+
+    spawn_blocking(move || {
+        let now = chrono::Utc::now().naive_utc();
+        let rw = db.rw_transaction()?;
+        let all_items: Vec<Item> = rw.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        let mut marked_read = 0u32;
+        let mut deleted = 0u32;
+
+        for item in &all_items {
+            let Some(pub_dt) = item.published_at.as_ref().and_then(|p| parse_datetime(p).ok()) else { continue };
+            let age = now - pub_dt;
+            let mark: Option<Mark> = rw.get().primary(item.id.clone()).ok().flatten();
+
+            if let Some(ref dur) = mark_after {
+                if age > *dur && !mark.as_ref().is_some_and(|m| m.read) {
+                    let new_mark = Mark {
+                        item_id: item.id.clone(),
+                        read: true,
+                        starred: mark.as_ref().is_some_and(|m| m.starred),
+                        note: mark.as_ref().and_then(|m| m.note.clone()),
+                        marked_at: chrono::Utc::now().to_rfc3339(),
+                        read_at: Some(chrono::Utc::now().to_rfc3339()),
+                        opened_at: mark.as_ref().and_then(|m| m.opened_at.clone()),
+                        read_later: mark.as_ref().is_some_and(|m| m.read_later),
+                    };
+                    let _: Option<Mark> = rw.upsert(new_mark)?;
+                    marked_read += 1;
+                }
+            }
+
+            if let Some(ref dur) = delete_after {
+                if age > *dur && !mark.as_ref().is_some_and(|m| m.starred) {
+                    rw.remove(item.clone())?;
+                    if let Some(m) = mark { rw.remove(m)?; }
+                    deleted += 1;
+                }
+            }
+        }
+
+        rw.commit()?;
+        Ok(CleanupResult { marked_read, deleted })
+    }).await?
 }
 
 // ---------------------------------------------------------------------------

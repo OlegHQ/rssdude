@@ -5,8 +5,8 @@ use chrono::Utc;
 use native_db::Database;
 use tokio::task::spawn_blocking;
 
-use crate::db::*;
-use crate::output::*;
+use crate::shared::db::*;
+use crate::shared::output::*;
 
 /// Core: apply mark flags to an item, returns (Item, Mark).
 pub async fn mark_core(
@@ -22,12 +22,18 @@ pub async fn mark_core(
             .with_context(|| format!("item {id} not found"))?;
         let existing: Option<Mark> = rw.get().primary(id.clone()).ok().flatten();
 
+        let now = Utc::now().to_rfc3339();
+        let was_read = existing.as_ref().is_some_and(|m| m.read);
+        let new_read = if read { true } else { was_read };
         let new_mark = Mark {
             item_id: id,
-            read: if read { true } else { existing.as_ref().is_some_and(|m| m.read) },
+            read: new_read,
             starred: if star { !existing.as_ref().is_some_and(|m| m.starred) } else { existing.as_ref().is_some_and(|m| m.starred) },
             note: if note.is_some() { note } else { existing.as_ref().and_then(|m| m.note.clone()) },
-            marked_at: Utc::now().to_rfc3339(),
+            read_at: if new_read && !was_read { Some(now.clone()) } else { existing.as_ref().and_then(|m| m.read_at.clone()) },
+            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
+            read_later: existing.as_ref().is_some_and(|m| m.read_later),
+            marked_at: now,
         };
         let _: Option<Mark> = rw.upsert(new_mark.clone())?;
         rw.commit()?;

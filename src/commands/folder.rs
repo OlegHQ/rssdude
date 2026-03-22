@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -6,8 +6,8 @@ use chrono::Utc;
 use native_db::Database;
 use tokio::task::spawn_blocking;
 
-use crate::db::*;
-use crate::output::*;
+use crate::shared::db::*;
+use crate::shared::output::*;
 
 // ---------------------------------------------------------------------------
 // Core functions (return data, no printing)
@@ -42,23 +42,25 @@ pub async fn rename_core(db: Arc<Database<'static>>, id: String, new_name: Strin
     }).await?
 }
 
-pub async fn move_folder_core(db: Arc<Database<'static>>, id: String, parent_id: String) -> Result<Folder> {
+pub async fn move_folder_core(db: Arc<Database<'static>>, id: String, parent_id: Option<String>) -> Result<Folder> {
     spawn_blocking(move || {
         let rw = db.rw_transaction()?;
         let folder: Folder = rw.get().primary(id.clone())?.ok_or_else(|| anyhow::anyhow!("Folder not found: {id}"))?;
-        let _: Folder = rw.get().primary(parent_id.clone())?.ok_or_else(|| anyhow::anyhow!("Parent folder not found: {parent_id}"))?;
 
-        // Cycle detection
-        let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
-        let folder_map: HashMap<String, &Folder> = all_folders.iter().map(|f| (f.id.clone(), f)).collect();
-        let mut current = Some(parent_id.clone());
-        while let Some(ref cid) = current {
-            if cid == &id { bail!("Cannot move folder: would create a cycle"); }
-            current = folder_map.get(cid).and_then(|f| f.parent_id.clone());
+        if let Some(ref pid) = parent_id {
+            let _: Folder = rw.get().primary(pid.clone())?.ok_or_else(|| anyhow::anyhow!("Parent folder not found: {pid}"))?;
+            // Cycle detection
+            let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
+            let folder_map: HashMap<String, &Folder> = all_folders.iter().map(|f| (f.id.clone(), f)).collect();
+            let mut current = Some(pid.clone());
+            while let Some(ref cid) = current {
+                if cid == &id { bail!("Cannot move folder: would create a cycle"); }
+                current = folder_map.get(cid).and_then(|f| f.parent_id.clone());
+            }
         }
 
         let mut updated = folder.clone();
-        updated.parent_id = Some(parent_id);
+        updated.parent_id = parent_id;
         rw.update(folder, updated.clone())?;
         rw.commit()?;
         Ok(updated)
@@ -74,24 +76,13 @@ pub async fn delete_core(db: Arc<Database<'static>>, id: String, recursive: bool
 
         if recursive {
             let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
-            let mut children_map: HashMap<Option<String>, Vec<Folder>> = HashMap::new();
-            for f in all_folders { children_map.entry(f.parent_id.clone()).or_default().push(f); }
+            let folder_ids = collect_descendant_ids(&all_folders, &id);
 
-            let mut folder_ids = vec![id.clone()];
-            let mut queue = VecDeque::new();
-            queue.push_back(id);
-            while let Some(fid) = queue.pop_front() {
-                if let Some(kids) = children_map.get(&Some(fid)) {
-                    for kid in kids { folder_ids.push(kid.id.clone()); queue.push_back(kid.id.clone()); }
-                }
-            }
-
-            let folder_id_set: HashSet<&str> = folder_ids.iter().map(|s| s.as_str()).collect();
             let all_feeds: Vec<Feed> = rw.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
             let mut feeds_deleted = 0;
             let mut items_deleted = 0;
             for feed in all_feeds {
-                if !feed.folder_id.as_ref().is_some_and(|fid| folder_id_set.contains(fid.as_str())) { continue; }
+                if !feed.folder_id.as_ref().is_some_and(|fid| folder_ids.contains(fid.as_str())) { continue; }
                 let items: Vec<Item> = rw.scan().secondary::<Item>(ItemKey::feed_id)?
                     .all()?.filter_map(|i| i.ok()).filter(|i: &Item| i.feed_id == feed.id).collect();
                 for item in &items {
@@ -239,7 +230,7 @@ pub async fn rename(db: Arc<Database<'static>>, json: bool, id: String, new_name
 }
 
 pub async fn move_folder(db: Arc<Database<'static>>, json: bool, id: String, parent_id: String) -> Result<()> {
-    let updated = move_folder_core(db, id, parent_id).await?;
+    let updated = move_folder_core(db, id, Some(parent_id)).await?;
     if json { print_json(&FolderJson::from(&updated)); }
     else { println!("Moved folder: {} -> parent {}", updated.name, updated.parent_id.as_deref().unwrap_or("(none)")); }
     Ok(())
@@ -308,7 +299,7 @@ fn render_tree_node(node: &TreeNode, header_prefix: &str, child_prefix: &str) {
     for (feed, unread) in &node.feeds {
         index += 1;
         let connector = if index == total_entries { "└── " } else { "├── " };
-        let name = feed.title.as_deref().unwrap_or(&feed.url);
+        let name = feed.display_title();
         println!("{child_prefix}{connector}{name:<40} {unread} unread");
     }
 }
@@ -316,7 +307,7 @@ fn render_tree_node(node: &TreeNode, header_prefix: &str, child_prefix: &str) {
 fn render_feed_list(feeds: &[(Feed, usize)], prefix: &str) {
     for (i, (feed, unread)) in feeds.iter().enumerate() {
         let connector = if i == feeds.len() - 1 { "└── " } else { "├── " };
-        let name = feed.title.as_deref().unwrap_or(&feed.url);
+        let name = feed.display_title();
         println!("{prefix}{connector}{name:<40} {unread} unread");
     }
 }

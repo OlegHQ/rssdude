@@ -1,6 +1,6 @@
 use super::*;
 impl App {
-    pub(super) fn new(db: Arc<Database<'static>>, tx: Sender<AppMessage>, rx: Receiver<AppMessage>) -> Self {
+    pub(super) fn new(db: Arc<Database<'static>>, tx: Sender<AppMessage>, rx: Receiver<AppMessage>, theme_name: &str) -> Self {
         Self {
             db,
             tx,
@@ -31,6 +31,15 @@ impl App {
             last_item_click: None,
             layout: None,
             preview_links: Vec::new(),
+            theme: theme::Theme::from_name(theme_name),
+            collapsed_folders: HashSet::new(),
+            visual_mode: false,
+            selected_items: HashSet::new(),
+            sort_order: "newest".into(),
+            dedup: false,
+            hover_sidebar: None,
+            hover_item: None,
+            hover_link: None,
         }
     }
 
@@ -178,42 +187,6 @@ impl App {
         });
     }
 
-    pub(super) fn status_text(&self) -> (String, bool) {
-        if let Some(sync) = &self.syncing {
-            return (
-                format!(
-                    "syncing {} {}/{}  {}  +{}",
-                    sync.scope, sync.completed, sync.total, sync.current, sync.total_new
-                ),
-                false,
-            );
-        }
-
-        if self.refreshing {
-            return ("refreshing data".to_string(), false);
-        }
-
-        if let Some(flash) = &self.flash {
-            if flash.at.elapsed() <= FLASH_TTL {
-                return (flash.text.clone(), flash.is_error);
-            }
-        }
-
-        let Some(data) = &self.data else {
-            return ("loading data".to_string(), false);
-        };
-
-        (
-            format!(
-                "{} feeds  {} unread  {} starred",
-                data.feeds.len(),
-                data.total_unread,
-                data.total_starred
-            ),
-            false,
-        )
-    }
-
     pub(super) fn sidebar_entries(&self) -> Vec<SidebarEntry> {
         let Some(data) = &self.data else {
             return vec![
@@ -222,12 +195,14 @@ impl App {
                     label: "All Items".to_string(),
                     unread: 0,
                     depth: 0,
+                    has_error: false, is_last_child: false,
                 },
                 SidebarEntry {
                     kind: SidebarKind::Starred,
                     label: "Starred".to_string(),
                     unread: 0,
                     depth: 0,
+                    has_error: false, is_last_child: false,
                 },
             ];
         };
@@ -238,12 +213,14 @@ impl App {
                 label: "All Items".to_string(),
                 unread: data.total_unread,
                 depth: 0,
+                has_error: false, is_last_child: false,
             },
             SidebarEntry {
                 kind: SidebarKind::Starred,
                 label: "Starred".to_string(),
                 unread: data.total_starred,
                 depth: 0,
+                has_error: false, is_last_child: false,
             },
         ];
 
@@ -278,6 +255,7 @@ impl App {
                     &feeds_by_folder,
                     &folders_by_parent,
                     &data.feed_stats,
+                    &self.collapsed_folders,
                 );
             }
         }
@@ -298,8 +276,10 @@ impl App {
                     label: "Uncategorized".to_string(),
                     unread,
                     depth: 0,
+                    has_error: false, is_last_child: false,
                 });
-                for feed in uncategorized {
+                let unc_len = uncategorized.len();
+                for (i, feed) in uncategorized.iter().enumerate() {
                     entries.push(SidebarEntry {
                         kind: SidebarKind::Feed(feed.id.clone()),
                         label: helpers::feed_label(feed),
@@ -309,9 +289,53 @@ impl App {
                             .map(|stats| stats.unread)
                             .unwrap_or(0),
                         depth: 1,
+                        has_error: feed.error_count > 0,
+                        is_last_child: i == unc_len - 1,
                     });
                 }
             }
+        }
+
+        // Read Later
+        let read_later_count = data.marks.values().filter(|m| m.read_later).count();
+        entries.push(SidebarEntry {
+            kind: SidebarKind::ReadLater,
+            label: "Read Later".into(),
+            unread: read_later_count,
+            depth: 0,
+            has_error: false, is_last_child: false,
+        });
+
+        // Recently Read
+        entries.push(SidebarEntry {
+            kind: SidebarKind::RecentlyRead,
+            label: "Recently Read".into(),
+            unread: 0,
+            depth: 0,
+            has_error: false, is_last_child: false,
+        });
+
+        // Boards
+        for board in &data.boards {
+            let count = data.board_items.iter().filter(|bi| bi.board_id == board.id).count();
+            entries.push(SidebarEntry {
+                kind: SidebarKind::Board(board.id.clone()),
+                label: format!("[B] {}", board.name),
+                unread: count,
+                depth: 0,
+                has_error: false, is_last_child: false,
+            });
+        }
+
+        // Watches
+        for watch in &data.watches {
+            entries.push(SidebarEntry {
+                kind: SidebarKind::Watch(watch.id.clone()),
+                label: format!("[W] {}", watch.name),
+                unread: 0,
+                depth: 0,
+                has_error: false, is_last_child: false,
+            });
         }
 
         entries
@@ -330,6 +354,28 @@ impl App {
         };
 
         let scope = self.selected_scope();
+
+        // Board/Watch scopes use a different base item set
+        let base_items: Vec<&Item> = match &scope {
+            SidebarKind::Board(board_id) => {
+                let item_ids: HashSet<&str> = data.board_items.iter()
+                    .filter(|bi| bi.board_id == *board_id)
+                    .map(|bi| bi.item_id.as_str())
+                    .collect();
+                data.items.iter().filter(|i| item_ids.contains(i.id.as_str())).collect()
+            }
+            SidebarKind::Watch(watch_id) => {
+                let query = data.watches.iter()
+                    .find(|w| w.id == *watch_id)
+                    .map(|w| w.query.to_lowercase())
+                    .unwrap_or_default();
+                data.items.iter()
+                    .filter(|item| helpers::item_matches_query(item, &query))
+                    .collect()
+            }
+            _ => data.items.iter().collect(),
+        };
+
         let descendant_ids = match &scope {
             SidebarKind::Folder(folder_id) => {
                 Some(collect_descendant_ids(&data.folders, folder_id))
@@ -339,17 +385,15 @@ impl App {
         let query = self.search_query.to_lowercase();
 
         let since_cutoff = self.since_filter.as_ref().and_then(|s| {
-            crate::output::parse_duration(s).ok().map(|dur| chrono::Utc::now().naive_utc() - dur)
+            crate::shared::output::parse_duration(s).ok().map(|dur| chrono::Utc::now().naive_utc() - dur)
         });
 
-        data.items
-            .iter()
+        let mut result: Vec<VisibleItem> = base_items
+            .into_iter()
             .filter(|item| helpers::item_matches_scope(item, &scope, data, descendant_ids.as_ref()))
             .filter(|item| helpers::item_matches_query(item, &query))
             .filter(|item| {
-                if !self.unread_only {
-                    return true;
-                }
+                if !self.unread_only { return true; }
                 !data.marks.get(&item.id).is_some_and(|mark| mark.read)
             })
             .filter(|item| {
@@ -357,25 +401,41 @@ impl App {
                     data.feed_lookup.get(&item.feed_id).is_some_and(|feed| {
                         feed.tags.split(',').any(|t| t.trim().eq_ignore_ascii_case(tag))
                     })
-                } else {
-                    true
-                }
+                } else { true }
             })
             .filter(|item| {
                 if let Some(ref cutoff) = since_cutoff {
                     item.published_at.as_ref().and_then(|p| {
                         chrono::DateTime::parse_from_rfc3339(p).ok().map(|d| d.naive_utc())
                     }).is_some_and(|dt| dt >= *cutoff)
-                } else {
-                    true
-                }
+                } else { true }
             })
+            .filter(|item| !is_muted(item, data.feed_lookup.get(&item.feed_id), &data.mute_filters))
             .map(|item| VisibleItem {
                 item: item.clone(),
                 feed: data.feed_lookup.get(&item.feed_id).cloned(),
                 mark: data.marks.get(&item.id).cloned(),
             })
-            .collect()
+            .collect();
+
+        // Sort: RecentlyRead sorts by read_at desc; otherwise by sort_order
+        if matches!(scope, SidebarKind::RecentlyRead) {
+            result.sort_by(|a, b| {
+                let a_at = a.mark.as_ref().and_then(|m| m.read_at.as_deref()).unwrap_or("");
+                let b_at = b.mark.as_ref().and_then(|m| m.read_at.as_deref()).unwrap_or("");
+                b_at.cmp(a_at)
+            });
+        } else if self.sort_order == "oldest" {
+            result.reverse();
+        }
+
+        // Dedup by guid
+        if self.dedup {
+            let mut seen = HashSet::new();
+            result.retain(|vi| seen.insert(vi.item.guid.clone()));
+        }
+
+        result
     }
 
     pub(super) fn current_item(&self) -> Option<VisibleItem> {

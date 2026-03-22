@@ -27,6 +27,10 @@ pub(super) async fn load_browser_data(db: Arc<Database<'static>>) -> Result<Brow
             .all()?
             .filter_map(|row| row.ok())
             .collect();
+        let mute_filters: Vec<MuteFilter> = r.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
+        let boards: Vec<Board> = r.scan().primary()?.all()?.filter_map(|b| b.ok()).collect();
+        let board_items: Vec<BoardItem> = r.scan().primary()?.all()?.filter_map(|b| b.ok()).collect();
+        let watches: Vec<SavedSearch> = r.scan().primary()?.all()?.filter_map(|s| s.ok()).collect();
 
         feeds.sort_by_key(helpers::feed_sort_key);
         folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -57,6 +61,10 @@ pub(super) async fn load_browser_data(db: Arc<Database<'static>>) -> Result<Brow
             feed_stats,
             total_unread,
             total_starred,
+            mute_filters,
+            boards,
+            board_items,
+            watches,
         })
     })
     .await?
@@ -229,7 +237,7 @@ pub(super) async fn move_folder_action(
     parent_id: Option<String>,
 ) -> Result<String> {
     if let Some(pid) = parent_id {
-        let folder = crate::commands::folder::move_folder_core(db, folder_id, pid).await?;
+        let folder = crate::commands::folder::move_folder_core(db, folder_id, Some(pid)).await?;
         Ok(format!("Moved folder \"{}\".", folder.name))
     } else {
         // Move to root (no parent) — not supported by move_folder_core which requires a parent
@@ -272,7 +280,7 @@ pub(super) async fn move_feed_action(
     folder_id: Option<String>,
 ) -> Result<String> {
     if let Some(fid) = folder_id {
-        let (feed_title, _) = crate::commands::feed_mgmt::move_to_folder_core(db, feed_id, fid).await?;
+        let (feed_title, _) = crate::commands::feed_mgmt::move_to_folder_core(db, feed_id, Some(fid)).await?;
         Ok(format!("Moved feed \"{feed_title}\"."))
     } else {
         // Move to root (uncategorized)
@@ -313,10 +321,14 @@ pub(super) async fn toggle_mark_action(db: Arc<Database<'static>>, item_id: Stri
             ToggleField::Star => (old_read, !old_star, if !old_star { "Starred:" } else { "Unstarred:" }),
         };
 
+        let now = Utc::now().to_rfc3339();
         let mark = Mark {
             item_id, read: new_read, starred: new_star,
-            note: existing.and_then(|m| m.note.clone()),
-            marked_at: Utc::now().to_rfc3339(),
+            note: existing.as_ref().and_then(|m| m.note.clone()),
+            read_at: if new_read && !old_read { Some(now.clone()) } else { existing.as_ref().and_then(|m| m.read_at.clone()) },
+            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
+            read_later: existing.as_ref().is_some_and(|m| m.read_later),
+            marked_at: now,
         };
         let _: Option<Mark> = rw.upsert(mark)?;
         rw.commit()?;
@@ -343,6 +355,9 @@ pub(super) async fn save_note_action(
             read: existing.as_ref().is_some_and(|mark| mark.read),
             starred: existing.as_ref().is_some_and(|mark| mark.starred),
             note: if note.is_empty() { None } else { Some(note) },
+            read_at: existing.as_ref().and_then(|m| m.read_at.clone()),
+            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
+            read_later: existing.as_ref().is_some_and(|m| m.read_later),
             marked_at: Utc::now().to_rfc3339(),
         };
         let _: Option<Mark> = rw.upsert(mark)?;
@@ -355,4 +370,124 @@ pub(super) async fn save_note_action(
     .await??;
 
     Ok(message)
+}
+
+pub(super) async fn mark_all_read_action(
+    db: Arc<Database<'static>>,
+    scope: String,
+    scope_id: Option<String>,
+) -> Result<String> {
+    spawn_blocking(move || {
+        let rw = db.rw_transaction()?;
+        let items: Vec<Item> = rw.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        let folders: Vec<Folder> = rw.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
+
+        let target_ids: std::collections::HashSet<String> = match (scope.as_str(), &scope_id) {
+            ("feed", Some(fid)) => items.iter().filter(|i| i.feed_id == *fid).map(|i| i.id.clone()).collect(),
+            ("folder", Some(fid)) => {
+                let desc = crate::shared::db::collect_descendant_ids(&folders, fid);
+                let feeds: Vec<Feed> = rw.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
+                let feed_ids: std::collections::HashSet<String> = feeds.iter()
+                    .filter(|f| f.folder_id.as_ref().is_some_and(|id| id == fid || desc.contains(id)))
+                    .map(|f| f.id.clone()).collect();
+                items.iter().filter(|i| feed_ids.contains(&i.feed_id)).map(|i| i.id.clone()).collect()
+            }
+            _ => items.iter().map(|i| i.id.clone()).collect(),
+        };
+
+        let now = Utc::now().to_rfc3339();
+        let mut count = 0usize;
+        for item_id in &target_ids {
+            let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
+            if existing.as_ref().is_some_and(|m| m.read) { continue; }
+            let mark = Mark {
+                item_id: item_id.clone(),
+                read: true,
+                starred: existing.as_ref().is_some_and(|m| m.starred),
+                note: existing.as_ref().and_then(|m| m.note.clone()),
+                read_at: Some(now.clone()),
+                opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
+                read_later: existing.as_ref().is_some_and(|m| m.read_later),
+                marked_at: now.clone(),
+            };
+            let _: Option<Mark> = rw.upsert(mark)?;
+            count += 1;
+        }
+        rw.commit()?;
+        Ok(format!("Marked {count} items as read."))
+    }).await?
+}
+
+pub(super) async fn toggle_read_later_action(db: Arc<Database<'static>>, item_id: String) -> Result<String> {
+    spawn_blocking(move || {
+        let rw = db.rw_transaction()?;
+        let item: Item = rw.get().primary(item_id.clone())?.ok_or_else(|| anyhow::anyhow!("Item not found."))?;
+        let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
+        let was_later = existing.as_ref().is_some_and(|m| m.read_later);
+        let now = Utc::now().to_rfc3339();
+        let mark = Mark {
+            item_id, read: existing.as_ref().is_some_and(|m| m.read),
+            starred: existing.as_ref().is_some_and(|m| m.starred),
+            note: existing.as_ref().and_then(|m| m.note.clone()),
+            read_at: existing.as_ref().and_then(|m| m.read_at.clone()),
+            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
+            read_later: !was_later, marked_at: now,
+        };
+        let _: Option<Mark> = rw.upsert(mark)?;
+        rw.commit()?;
+        let title = item.title.unwrap_or_else(|| "(untitled)".into());
+        Ok(if was_later { format!("Removed from read later: {title}") } else { format!("Added to read later: {title}") })
+    }).await?
+}
+
+pub(super) async fn create_board_action(db: Arc<Database<'static>>, name: String) -> Result<String> {
+    crate::commands::board::create_core(db, name.clone()).await?;
+    Ok(format!("Created board \"{name}\"."))
+}
+
+pub(super) async fn add_to_board_action(db: Arc<Database<'static>>, board_id: String, item_id: String) -> Result<String> {
+    crate::commands::board::add_item_core(db, board_id, item_id, None).await?;
+    Ok("Added to board.".into())
+}
+
+pub(super) async fn delete_board_action(db: Arc<Database<'static>>, id: String) -> Result<String> {
+    let name = crate::commands::board::delete_core(db, id).await?;
+    Ok(format!("Deleted board \"{name}\"."))
+}
+
+pub(super) async fn create_watch_action(db: Arc<Database<'static>>, name: String, query: String) -> Result<String> {
+    let ss = crate::commands::watch::create_core(db, name, query).await?;
+    Ok(format!("Created watch \"{}\".", ss.name))
+}
+
+pub(super) async fn import_opml_action(db: Arc<Database<'static>>, path: String) -> Result<String> {
+    let content = tokio::fs::read_to_string(&path).await?;
+    let result = crate::commands::opml::import_core(db, content).await?;
+    Ok(format!("Imported {} feeds, {} folders.", result.feeds_added, result.folders_created))
+}
+
+pub(super) async fn fetch_full_article_action(db: Arc<Database<'static>>, item_id: String) -> Result<String> {
+    let db2 = Arc::clone(&db);
+    let id2 = item_id.clone();
+    let (url, existing_full) = spawn_blocking(move || -> Result<(Option<String>, Option<String>)> {
+        let r = db2.r_transaction()?;
+        let item: Item = r.get().primary(id2)?.context("item not found")?;
+        Ok((item.link.clone(), item.full_content.clone()))
+    }).await??;
+    if let Some(content) = existing_full {
+        return Ok(format!("Full article already cached ({} chars).", content.len()));
+    }
+    let url = url.context("item has no link")?;
+    let text = crate::shared::feed::fetch_full_article(&url).await?;
+    let text2 = text.clone();
+    spawn_blocking(move || -> Result<()> {
+        let rw = db.rw_transaction()?;
+        let old: Item = rw.get().primary(item_id.clone())?.context("item not found")?;
+        let mut updated = old.clone();
+        updated.full_content = Some(text2);
+        rw.update(old, updated)?;
+        rw.commit()?;
+        Ok(())
+    }).await??;
+    Ok(format!("Full article fetched ({} chars).", text.len()))
 }

@@ -1,5 +1,15 @@
+use super::theme::Theme;
 use super::*;
 
+fn themed_block<'a>(title: &'a str, focused: bool, theme: &Theme) -> Block<'a> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(focus_border(focused, theme))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_sidebar(
     frame: &mut Frame,
     area: Rect,
@@ -7,21 +17,61 @@ pub(super) fn draw_sidebar(
     selected: usize,
     offset: usize,
     focus: Focus,
+    theme: &Theme,
+    collapsed: &HashSet<String>,
+    hover: Option<usize>,
 ) -> usize {
     let items: Vec<ListItem> = entries
         .iter()
-        .map(|entry| {
-            let prefix = "  ".repeat(entry.depth);
-            let line = Line::from(vec![
-                Span::raw(prefix),
-                Span::raw(entry.label.clone()),
-                Span::raw(" "),
-                Span::styled(
-                    format!("({})", entry.unread),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
-            ListItem::new(line)
+        .enumerate()
+        .map(|(i, entry)| {
+            let is_selected = i == selected;
+            let is_hovered = hover == Some(i) && !is_selected;
+            let gutter = if is_selected { "\u{2503} " } else if is_hovered { "\u{2502} " } else { "  " };
+
+            let tree_prefix = if entry.depth > 0 {
+                if entry.is_last_child { "\u{2570}\u{2500}\u{2500} " } else { "\u{251c}\u{2500}\u{2500} " }
+            } else { "" };
+            let indent = if entry.depth > 1 { "  ".repeat(entry.depth - 1) } else { String::new() };
+
+            let folder_icon = match &entry.kind {
+                SidebarKind::Folder(id) => {
+                    if collapsed.contains(id) { "\u{25b8} " } else { "\u{25be} " }
+                }
+                _ => "",
+            };
+
+            let label_style = if is_selected {
+                Style::default().fg(theme.accent)
+            } else if is_hovered {
+                Style::default().fg(theme.fg)
+            } else {
+                Style::default().fg(theme.fg_dim)
+            };
+            let gutter_style = if is_selected {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.fg_faint)
+            };
+
+            let mut spans = vec![
+                Span::styled(gutter, gutter_style),
+                Span::styled(indent, Style::default().fg(theme.fg_faint)),
+                Span::styled(tree_prefix, Style::default().fg(theme.fg_faint)),
+                Span::styled(folder_icon, Style::default().fg(theme.fg_dim)),
+            ];
+
+            if entry.has_error {
+                spans.push(Span::styled("! ", Style::default().fg(theme.accent_secondary)));
+            }
+
+            spans.push(Span::styled(entry.label.clone(), label_style));
+
+            if entry.unread > 0 {
+                spans.push(Span::styled(format!(" ({})", entry.unread), Style::default().fg(theme.accent_secondary)));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -31,19 +81,13 @@ pub(super) fn draw_sidebar(
     }
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title("Folders and feeds")
-                .borders(Borders::ALL)
-                .border_style(focus_border(focus == Focus::Sidebar)),
-        )
-        .highlight_style(selected_style())
-        .highlight_symbol("> ");
+        .block(themed_block("Feeds", focus == Focus::Sidebar, theme));
 
     frame.render_stateful_widget(list, area, &mut state);
     state.offset()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_items(
     frame: &mut Frame,
     area: Rect,
@@ -51,45 +95,85 @@ pub(super) fn draw_items(
     selected: usize,
     offset: usize,
     focus: Focus,
+    theme: &Theme,
+    visual_mode: bool,
+    selected_items: &HashSet<String>,
+    hover: Option<usize>,
 ) -> usize {
     let list_items: Vec<ListItem> = items
         .iter()
-        .map(|entry| {
-            let title = entry
-                .item
-                .title
-                .as_deref()
-                .unwrap_or("(untitled)")
-                .to_string();
-            let source = entry
-                .feed
-                .as_ref()
-                .map(helpers::feed_label)
-                .unwrap_or_else(|| "(unknown feed)".to_string());
-            let published = entry
-                .item
-                .published_at
-                .as_deref()
-                .map(time_ago)
-                .unwrap_or_else(|| "-".to_string());
-            let status = format!(
-                "{}{}",
-                if entry.mark.as_ref().is_some_and(|mark| mark.read) {
-                    "r "
-                } else {
-                    "u "
-                },
-                if entry.mark.as_ref().is_some_and(|mark| mark.starred) {
-                    "*"
-                } else {
-                    "-"
-                }
-            );
+        .enumerate()
+        .map(|(i, entry)| {
+            let is_cursor = i == selected;
+            let is_hovered = hover == Some(i) && !is_cursor;
+            let is_read = entry.mark.as_ref().is_some_and(|m| m.read);
+            let is_starred = entry.mark.as_ref().is_some_and(|m| m.starred);
+            let is_unread = !is_read;
+            let is_vis_selected = visual_mode && selected_items.contains(&entry.item.id);
 
-            let subtitle = format!("{source}  {published}  {status}");
+            let gutter = if is_cursor {
+                "\u{2503} "
+            } else if is_vis_selected {
+                "\u{2503} "
+            } else if is_hovered {
+                "\u{2502} "
+            } else {
+                "  "
+            };
+
+            let title = entry.item.title.as_deref().unwrap_or("(untitled)");
+            let title_style = if is_vis_selected {
+                Style::default().fg(theme.accent_secondary).add_modifier(Modifier::BOLD)
+            } else if is_cursor {
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+            } else if is_hovered && is_unread {
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
+            } else if is_hovered {
+                Style::default().fg(theme.fg)
+            } else if is_unread {
+                Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.fg_faint)
+            };
+            let gutter_style = if is_vis_selected {
+                Style::default().fg(theme.accent_secondary)
+            } else if is_cursor {
+                Style::default().fg(theme.accent)
+            } else {
+                Style::default().fg(theme.fg_faint)
+            };
+
+            let source = entry.feed.as_ref().map(helpers::feed_label)
+                .unwrap_or_else(|| "(unknown)".to_string());
+            let published = entry.item.published_at.as_deref()
+                .map(time_ago).unwrap_or_else(|| "-".to_string());
+
+            let mut status_spans: Vec<Span> = Vec::new();
+            if is_unread {
+                status_spans.push(Span::styled("\u{25cf}", Style::default().fg(theme.accent_secondary)));
+            }
+            if is_starred {
+                if !status_spans.is_empty() { status_spans.push(Span::styled(" ", Style::default())); }
+                status_spans.push(Span::styled("\u{2605}", Style::default().fg(theme.accent)));
+            }
+            let status_str = if status_spans.is_empty() { String::new() } else {
+                format!(" \u{2022} {}", if is_unread && is_starred { "\u{25cf} \u{2605}" }
+                    else if is_unread { "\u{25cf}" }
+                    else { "\u{2605}" })
+            };
+
+            let meta = format!("  {source} \u{2022} {published}{status_str}");
+            let meta_style = if is_vis_selected {
+                Style::default().fg(theme.accent_secondary)
+            } else {
+                Style::default().fg(theme.fg_dim)
+            };
             ListItem::new(vec![
-                Line::from(Span::raw(title)),
-                Line::from(Span::styled(subtitle, Style::default().fg(Color::DarkGray))),
+                Line::from(vec![
+                    Span::styled(gutter, gutter_style),
+                    Span::styled(title, title_style),
+                ]),
+                Line::from(Span::styled(meta, meta_style)),
             ])
         })
         .collect();
@@ -99,20 +183,8 @@ pub(super) fn draw_items(
         state.select(Some(selected));
     }
 
-    let title = if items.is_empty() {
-        "Items (empty)".to_string()
-    } else {
-        format!("Items ({})", items.len())
-    };
     let list = List::new(list_items)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(focus_border(focus == Focus::Items)),
-        )
-        .highlight_style(selected_style())
-        .highlight_symbol("> ");
+        .block(themed_block("Items", focus == Focus::Items, theme));
 
     frame.render_stateful_widget(list, area, &mut state);
     state.offset()
@@ -124,135 +196,115 @@ pub(super) fn draw_preview(
     item: Option<VisibleItem>,
     scroll: u16,
     focus: Focus,
+    theme: &Theme,
 ) -> Vec<PreviewLink> {
     let mut links = Vec::new();
-    let w = area.width.saturating_sub(2) as usize; // inner width (minus borders)
+    let w = area.width.saturating_sub(4) as usize; // inner width with some padding
 
-    let (title, text) = if let Some(entry) = item {
+    let text = if let Some(entry) = item {
         let source = entry.feed.as_ref().map(helpers::feed_label)
             .unwrap_or_else(|| "(unknown feed)".to_string());
         let published = entry.item.published_at.as_deref()
-            .map(|p| format!("{} ({})", time_ago(p), p))
-            .unwrap_or_else(|| "-".to_string());
-        let url = entry.item.link.clone().unwrap_or_else(|| "-".to_string());
+            .map(time_ago).unwrap_or_else(|| "-".to_string());
+        let url = entry.item.link.clone().unwrap_or_default();
         let body = helpers::preview_body(&entry.item, w);
-        // Extract full URLs from unwrapped text so wrapped fragments resolve correctly
         let raw_content = entry.item.content.as_deref().or(entry.item.summary.as_deref()).unwrap_or("");
         let wide_text = helpers::strip_html(raw_content, 100_000);
         let mut known_urls = helpers::extract_urls(&wide_text);
         if url.starts_with("http") { known_urls.push(url.clone()); }
 
-        let url_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED);
+        let url_style = Style::default().fg(theme.accent_secondary).add_modifier(Modifier::UNDERLINED);
         let mut lines: Vec<Line> = Vec::new();
 
-        // Title (bold, wrapped)
+        // Title
         let title_text = entry.item.title.unwrap_or_else(|| "(untitled)".to_string());
         for wl in helpers::wrap_text(&title_text, w) {
-            lines.push(Line::from(Span::styled(wl, Style::default().add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(Span::styled(wl, Style::default().fg(theme.accent).add_modifier(Modifier::BOLD))));
         }
 
-        // Metadata (wrapped)
-        for wl in helpers::wrap_text(&format!("Source: {source}"), w) { lines.push(Line::from(wl)); }
-        for wl in helpers::wrap_text(&format!("Published: {published}"), w) { lines.push(Line::from(wl)); }
+        // Metadata: source + time, dot-separated
+        let meta = format!("{source} \u{2022} {published}");
+        lines.push(Line::from(Span::styled(meta, Style::default().fg(theme.fg_dim))));
 
-        // URL header — wrap and style every segment as clickable
+        // URL
         if url.starts_with("http") {
-            let full = format!("URL: {url}");
-            for wl in helpers::wrap_text(&full, w) {
+            for wl in helpers::wrap_text(&url, w) {
                 let li = lines.len();
-                if let Some(pos) = wl.find("http") {
-                    let mut spans = Vec::new();
-                    if pos > 0 { spans.push(Span::raw(wl[..pos].to_string())); }
-                    spans.push(Span::styled(wl[pos..].to_string(), url_style));
-                    links.push(PreviewLink { line: li, col_start: pos, col_end: wl.len(), url: url.clone() });
-                    lines.push(Line::from(spans));
-                } else {
-                    // Continuation of the URL — whole line is clickable
-                    links.push(PreviewLink { line: li, col_start: 0, col_end: wl.len(), url: url.clone() });
-                    lines.push(Line::from(Span::styled(wl, url_style)));
+                links.push(PreviewLink { line: li, col_start: 0, col_end: wl.len(), url: url.clone() });
+                lines.push(Line::from(Span::styled(wl, url_style)));
+            }
+        }
+
+        // Note
+        if let Some(note) = entry.mark.and_then(|m| m.note) {
+            if !note.is_empty() {
+                for wl in helpers::wrap_text(&format!("Note: {note}"), w) {
+                    lines.push(Line::from(Span::styled(wl, Style::default().fg(theme.fg_dim))));
                 }
             }
-        } else {
-            lines.push(Line::from(format!("URL: {url}")));
         }
 
-        if let Some(note) = entry.mark.and_then(|mark| mark.note) {
-            if !note.is_empty() {
-                for wl in helpers::wrap_text(&format!("Note: {note}"), w) { lines.push(Line::from(wl)); }
-            }
-        }
-
+        // Horizontal rule
+        let rule = "\u{2500}".repeat(w.min(120));
+        lines.push(Line::from(Span::styled(rule, Style::default().fg(theme.fg_faint))));
         lines.push(Line::from(""));
 
-        // Body — already wrapped by html2text to width w.
-        // Track URL continuations across wrapped line breaks.
-        stylize_body(&body, &mut lines, &mut links, &known_urls, url_style);
+        // Body
+        stylize_body(&body, &mut lines, &mut links, &known_urls, url_style, theme);
 
-        ("Preview".to_string(), Text::from(lines))
+        Text::from(lines)
     } else {
-        (
-            "Preview".to_string(),
-            Text::from(vec![
-                Line::from("No item selected."),
-                Line::from("Use the sidebar and item list to browse feeds."),
-            ]),
-        )
+        Text::from(vec![
+            Line::from(Span::styled("No item selected.", Style::default().fg(theme.fg_dim))),
+            Line::from(Span::styled("Use the sidebar and item list to browse feeds.", Style::default().fg(theme.fg_dim))),
+        ])
     };
 
-    let paragraph = Paragraph::new(text)
-        .scroll((scroll, 0))
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(focus_border(focus == Focus::Preview)),
-        );
-    frame.render_widget(paragraph, area);
+    let block = themed_block("Preview", focus == Focus::Preview, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    // Add 1-column horizontal padding
+    let padded = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: inner.height,
+    };
+    let paragraph = Paragraph::new(text).scroll((scroll, 0));
+    frame.render_widget(paragraph, padded);
     links
 }
 
-/// Process body text lines, styling URLs and tracking continuations across wrapped lines.
 fn stylize_body(
     body: &str,
     lines: &mut Vec<Line<'static>>,
     links: &mut Vec<PreviewLink>,
     known_urls: &[String],
     url_style: Style,
+    _theme: &Theme,
 ) {
-    // (full_url, chars_of_url_already_rendered)
     let mut continuation: Option<(String, usize)> = None;
 
     for raw_line in body.lines() {
         let li = lines.len();
 
-        // Check if this line continues a URL from the previous line
         if let Some((ref full_url, shown)) = continuation {
             let remaining = &full_url[shown..];
             if !remaining.is_empty() && (remaining.starts_with(raw_line) || raw_line.starts_with(remaining)) {
                 let match_len = raw_line.len().min(remaining.len());
                 let url_part = &raw_line[..match_len];
                 let after = &raw_line[match_len..];
-
-                let mut spans: Vec<Span<'static>> = Vec::new();
-                spans.push(Span::styled(url_part.to_string(), url_style));
+                let mut spans: Vec<Span<'static>> = vec![Span::styled(url_part.to_string(), url_style)];
                 links.push(PreviewLink { line: li, col_start: 0, col_end: match_len, url: full_url.clone() });
-                if !after.is_empty() {
-                    spans.push(Span::raw(after.to_string()));
-                }
+                if !after.is_empty() { spans.push(Span::raw(after.to_string())); }
                 lines.push(Line::from(spans));
-
                 let new_shown = shown + match_len;
-                continuation = if new_shown < full_url.len() {
-                    Some((full_url.clone(), new_shown))
-                } else {
-                    None
-                };
+                continuation = if new_shown < full_url.len() { Some((full_url.clone(), new_shown)) } else { None };
                 continue;
             }
             continuation = None;
         }
 
-        // Normal line: find URLs starting with http
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut last_end = 0;
 
@@ -261,130 +313,98 @@ fn stylize_body(
             let url_len = rest.find(|c: char| c.is_whitespace() || c == '>' || c == '"' || c == '\'' || c == ')' || c == ']')
                 .unwrap_or(rest.len());
             let fragment = &raw_line[start..start + url_len];
-
-            if !fragment.starts_with("http://") && !fragment.starts_with("https://") {
-                continue;
-            }
-
-            // Resolve to full URL
-            let full_url = known_urls.iter()
-                .find(|known| known.starts_with(fragment))
-                .cloned()
+            if !fragment.starts_with("http://") && !fragment.starts_with("https://") { continue; }
+            let full_url = known_urls.iter().find(|k| k.starts_with(fragment)).cloned()
                 .unwrap_or_else(|| fragment.to_string());
-
-            if start > last_end {
-                spans.push(Span::raw(raw_line[last_end..start].to_string()));
-            }
+            if start > last_end { spans.push(Span::raw(raw_line[last_end..start].to_string())); }
             spans.push(Span::styled(fragment.to_string(), url_style));
             links.push(PreviewLink { line: li, col_start: start, col_end: start + url_len, url: full_url.clone() });
             last_end = start + url_len;
-
-            // If this URL was truncated by wrapping, track continuation
-            if fragment.len() < full_url.len() {
-                continuation = Some((full_url, fragment.len()));
-            }
+            if fragment.len() < full_url.len() { continuation = Some((full_url, fragment.len())); }
         }
 
         if last_end == 0 {
             lines.push(Line::from(raw_line.to_string()));
         } else {
-            if last_end < raw_line.len() {
-                spans.push(Span::raw(raw_line[last_end..].to_string()));
-            }
+            if last_end < raw_line.len() { spans.push(Span::raw(raw_line[last_end..].to_string())); }
             lines.push(Line::from(spans));
         }
     }
 }
 
-pub(super) fn draw_help_overlay(frame: &mut Frame) {
-    let area = centered_rect(70, 24, frame.area());
+pub(super) fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
+    let area = centered_rect(70, 28, frame.area());
     frame.render_widget(Clear, area);
+    let bold = Style::default().add_modifier(Modifier::BOLD).fg(theme.fg);
+    let normal = Style::default().fg(theme.fg);
+    let dim = Style::default().fg(theme.fg_dim);
     let text = Text::from(vec![
-        Line::from(Span::styled(
-            "rssdude TUI",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled("rssdude", bold)),
         Line::from(""),
-        Line::from("Navigation"),
-        Line::from("  Tab / Shift-Tab  cycle panes"),
-        Line::from("  j / k             move selection"),
-        Line::from("  Enter             open item / focus preview"),
-        Line::from("  PageUp/PageDown   move faster"),
-        Line::from("  Ctrl-d / Ctrl-u   half-page scroll"),
+        Line::from(Span::styled("Navigation", bold)),
+        Line::from(Span::styled("  h / l             traverse panes", normal)),
+        Line::from(Span::styled("  Tab / Shift-Tab   cycle panes", normal)),
+        Line::from(Span::styled("  j / k             move selection", normal)),
+        Line::from(Span::styled("  Enter             open item / focus preview", normal)),
+        Line::from(Span::styled("  Ctrl-d / Ctrl-u   half-page scroll", normal)),
+        Line::from(Span::styled("  g / G             go to top / bottom", normal)),
         Line::from(""),
-        Line::from("Actions"),
-        Line::from("  r                 sync all feeds"),
-        Line::from("  s                 sync selected feed / current item feed"),
-        Line::from("  a                 add feed into current folder context"),
-        Line::from("  n                 create folder"),
-        Line::from("  e                 rename selected folder"),
-        Line::from("  M                 move selected feed or folder"),
-        Line::from("  x                 delete selected feed or folder"),
-        Line::from("  X                 recursive folder delete"),
+        Line::from(Span::styled("Actions", bold)),
+        Line::from(Span::styled("  r   sync all    s   sync feed    a   add feed", dim)),
+        Line::from(Span::styled("  n   new folder  e   rename       M   move", dim)),
+        Line::from(Span::styled("  x   delete      X   recursive    o   open link", dim)),
         Line::from(""),
-        Line::from("Item tools"),
-        Line::from("  space             toggle read"),
-        Line::from("  *                 toggle star / unstar"),
-        Line::from("  N                 edit note"),
-        Line::from("  E                 export item (md/json/txt)"),
-        Line::from("  /                 search (comma-separated keywords)"),
-        Line::from("  u                 toggle unread-only"),
-        Line::from("  t                 filter by tag"),
-        Line::from("  d                 filter by time range"),
-        Line::from("  o                 open item link"),
+        Line::from(Span::styled("Items", bold)),
+        Line::from(Span::styled("  space  mark read + next   *   star/unstar", dim)),
+        Line::from(Span::styled("  N      edit note          E   export", dim)),
+        Line::from(Span::styled("  /      search             u   unread only", dim)),
+        Line::from(Span::styled("  L      read later         t   filter tag", dim)),
+        Line::from(Span::styled("  d      filter time        v   visual mode", dim)),
         Line::from(""),
-        Line::from("Views"),
-        Line::from("  D                 digest (recent items by feed)"),
-        Line::from("  T                 trending keywords"),
+        Line::from(Span::styled("Views", bold)),
+        Line::from(Span::styled("  D   digest    T   trending    ?   this help", dim)),
         Line::from(""),
-        Line::from("Press Esc or ? to close help."),
+        Line::from(Span::styled("  space on sidebar collapses/expands folders", dim)),
+        Line::from(""),
+        Line::from(Span::styled("Press Esc or ? to close.", Style::default().fg(theme.fg_faint))),
     ]);
     frame.render_widget(
         Paragraph::new(text)
             .wrap(Wrap { trim: false })
-            .block(Block::default().title("Help").borders(Borders::ALL)),
+            .block(themed_block("Help", true, theme)),
         area,
     );
 }
 
-pub(super) fn draw_scrollable_overlay(frame: &mut Frame, title: &str, lines: &[String], scroll: u16) {
+pub(super) fn draw_scrollable_overlay(frame: &mut Frame, title: &str, lines: &[String], scroll: u16, theme: &Theme) {
     let area = centered_rect(80, 24, frame.area());
     frame.render_widget(Clear, area);
     let text_lines: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
     let paragraph = Paragraph::new(Text::from(text_lines))
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0))
-        .block(Block::default().title(title).borders(Borders::ALL));
+        .block(themed_block(title, true, theme));
     frame.render_widget(paragraph, area);
 }
 
-pub(super) fn draw_modal(frame: &mut Frame, modal: &Modal) {
+pub(super) fn draw_modal(frame: &mut Frame, modal: &Modal, theme: &Theme) {
     match modal {
         Modal::Input(input) => {
             let height = (input.fields.len() as u16) + 6;
             let area = centered_rect(70, height, frame.area());
             frame.render_widget(Clear, area);
-
             let mut lines = vec![Line::from(input.hint.clone()), Line::from("")];
             for (index, field) in input.fields.iter().enumerate() {
-                let marker = if index == input.active { ">" } else { " " };
+                let marker = if index == input.active { "\u{25b8}" } else { " " };
                 let suffix = if index == input.active { "_" } else { "" };
-                lines.push(Line::from(format!(
-                    "{marker} {}: {}{suffix}",
-                    field.label, field.value
-                )));
+                lines.push(Line::from(format!("{marker} {}: {}{suffix}", field.label, field.value)));
             }
             lines.push(Line::from(""));
             lines.push(Line::from("Enter submit  Tab move field  Esc cancel"));
-
             frame.render_widget(
                 Paragraph::new(Text::from(lines))
                     .wrap(Wrap { trim: false })
-                    .block(
-                        Block::default()
-                            .title(input.title.clone())
-                            .borders(Borders::ALL),
-                    ),
+                    .block(themed_block(&input.title, true, theme)),
                 area,
             );
         }
@@ -392,22 +412,23 @@ pub(super) fn draw_modal(frame: &mut Frame, modal: &Modal) {
             let height = (picker.entries.len().min(12) as u16) + 4;
             let area = centered_rect(60, height, frame.area());
             frame.render_widget(Clear, area);
-
-            let items: Vec<ListItem> = picker
-                .entries
-                .iter()
-                .map(|entry| ListItem::new(entry.label.clone()))
-                .collect();
+            let items: Vec<ListItem> = picker.entries.iter().enumerate().map(|(i, entry)| {
+                let is_sel = i == picker.selected;
+                let gutter = if is_sel { "\u{2503} " } else { "  " };
+                let style = if is_sel {
+                    Style::default().fg(theme.accent)
+                } else {
+                    Style::default().fg(theme.fg)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(gutter, if is_sel { Style::default().fg(theme.accent) } else { Style::default() }),
+                    Span::styled(entry.label.clone(), style),
+                ]))
+            }).collect();
             let mut state = ListState::default();
             state.select(Some(picker.selected));
             let list = List::new(items)
-                .block(
-                    Block::default()
-                        .title(picker.title.clone())
-                        .borders(Borders::ALL),
-                )
-                .highlight_style(selected_style())
-                .highlight_symbol("> ");
+                .block(themed_block(&picker.title, true, theme));
             frame.render_stateful_widget(list, area, &mut state);
         }
         Modal::Confirm(confirm) => {
@@ -419,29 +440,20 @@ pub(super) fn draw_modal(frame: &mut Frame, modal: &Modal) {
                 Line::from("Enter or y confirm  Esc or n cancel"),
             ]);
             frame.render_widget(
-                Paragraph::new(text).wrap(Wrap { trim: false }).block(
-                    Block::default()
-                        .title(confirm.title.clone())
-                        .borders(Borders::ALL),
-                ),
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .block(themed_block(&confirm.title, true, theme)),
                 area,
             );
         }
     }
 }
 
-pub(super) fn selected_style() -> Style {
-    Style::default()
-        .bg(Color::Blue)
-        .fg(Color::White)
-        .add_modifier(Modifier::BOLD)
-}
-
-pub(super) fn focus_border(active: bool) -> Style {
+pub(super) fn focus_border(active: bool, theme: &Theme) -> Style {
     if active {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(theme.border_focus)
     } else {
-        Style::default()
+        Style::default().fg(theme.border)
     }
 }
 
@@ -470,7 +482,6 @@ pub(super) fn inner_rect(area: Rect) -> Rect {
     if area.width <= 2 || area.height <= 2 {
         return area;
     }
-
     Rect {
         x: area.x + 1,
         y: area.y + 1,

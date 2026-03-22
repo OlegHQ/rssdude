@@ -1,10 +1,6 @@
-mod client;
 mod commands;
-mod config;
-mod db;
-mod feed;
-mod output;
-mod server;
+mod net;
+mod shared;
 mod tui;
 
 use anyhow::Result;
@@ -128,6 +124,15 @@ enum Command {
         #[arg(long)]
         folder: String,
     },
+    /// Show reading statistics and feed engagement
+    Stats {
+        /// Time window (default: 30d)
+        #[arg(long, default_value = "30d")]
+        since: String,
+        /// Show dead feeds below this engagement % (default: 5)
+        #[arg(long)]
+        dead: Option<f32>,
+    },
     /// Start server mode
     Serve {
         /// Bind address (e.g. 0.0.0.0:8484)
@@ -168,11 +173,11 @@ async fn main() {
     let json = cli.json;
 
     // Load config for server/client mode
-    let config = match config::Config::load() {
+    let config = match shared::config::Config::load() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("warning: failed to load config: {e:#}");
-            config::Config::default()
+            shared::config::Config::default()
         }
     };
 
@@ -181,14 +186,14 @@ async fn main() {
         let bind_addr = bind
             .clone()
             .unwrap_or_else(|| config.bind_address());
-        let db = match db::open_db(&db::db_path()).await {
+        let db = match shared::db::open_db(&shared::db::db_path()).await {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("error: {e:#}");
                 std::process::exit(1);
             }
         };
-        if let Err(e) = server::serve(db, bind_addr, config.server.token.clone()).await {
+        if let Err(e) = net::server::serve(db, bind_addr, config.server.token.clone()).await {
             eprintln!("error: {e:#}");
             std::process::exit(1);
         }
@@ -197,7 +202,7 @@ async fn main() {
 
     // If config has a remote server address, use client mode
     if config.has_remote() {
-        let remote_client = match client::Client::from_config(&config) {
+        let remote_client = match net::client::Client::from_config(&config) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -213,7 +218,7 @@ async fn main() {
     }
 
     // Standalone mode — open local DB
-    let db = match db::open_db(&db::db_path()).await {
+    let db = match shared::db::open_db(&shared::db::db_path()).await {
         Ok(d) => d,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -287,6 +292,9 @@ async fn main() {
             limit,
             since,
         }) => commands::discover::match_keywords(db, json, keywords, limit, since).await,
+        Some(Command::Stats { since, dead }) => {
+            commands::stats::stats(db, json, Some(since), dead).await
+        }
         Some(Command::Folder { action }) => match action {
             FolderAction::Create { name, parent } => {
                 commands::folder::create(db, json, name, parent).await
@@ -309,7 +317,7 @@ async fn main() {
 }
 
 /// Dispatch commands to the remote server via HTTP client.
-async fn dispatch_remote(c: client::Client, command: Option<Command>, json: bool) -> Result<()> {
+async fn dispatch_remote(c: net::client::Client, command: Option<Command>, json: bool) -> Result<()> {
     match command {
         None => {
             // TUI in client mode not yet supported
@@ -347,6 +355,7 @@ async fn dispatch_remote(c: client::Client, command: Option<Command>, json: bool
             limit,
             since,
         }) => c.match_keywords(json, keywords, limit, since).await,
+        Some(Command::Stats { since, dead }) => c.stats(json, since, dead).await,
         Some(Command::Folder { action }) => match action {
             FolderAction::Create { name, parent } => c.folder_create(json, name, parent).await,
             FolderAction::List => c.folder_list(json).await,

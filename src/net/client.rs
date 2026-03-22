@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::config::Config;
-use crate::output::*;
+use crate::shared::config::Config;
+use crate::shared::output::*;
 
 fn as_array(val: &Value) -> &[Value] {
     val.as_array().map(|a| a.as_slice()).unwrap_or(&[])
@@ -531,6 +531,43 @@ impl Client {
                 })
                 .collect();
             print_table(&["ID", "SOURCE", "TITLE", "MATCHED", "PUBLISHED"], &rows);
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // Stats
+    // ---------------------------------------------------------------------------
+
+    pub async fn stats(&self, json: bool, since: String, dead: Option<f32>) -> Result<()> {
+        let mut path = format!("/api/stats?since={}", urlencoding(&since));
+        if let Some(d) = dead {
+            path.push_str(&format!("&dead={d}"));
+        }
+        let resp = self.get(&path).await?;
+        if json {
+            print_json(&resp);
+        } else {
+            println!("Reading Activity (last {} days)", resp["window_days"].as_u64().unwrap_or(30));
+            let a = &resp["activity"];
+            println!("  Articles read:     {:>5} ({:.1}/day avg)", a["articles_read"].as_u64().unwrap_or(0), a["daily_avg"].as_f64().unwrap_or(0.0));
+            println!("  Articles opened:   {:>5} ({:.1}% open rate)", a["articles_opened"].as_u64().unwrap_or(0), a["open_rate"].as_f64().unwrap_or(0.0));
+            println!("  Articles starred:  {:>5} ({:.1}% star rate)", a["articles_starred"].as_u64().unwrap_or(0), a["star_rate"].as_f64().unwrap_or(0.0));
+            println!("  Current streak:    {:>5} days", resp["streak"].as_u64().unwrap_or(0));
+            println!();
+            if let Some(feeds) = resp["per_feed"].as_array() {
+                let rows: Vec<Vec<String>> = feeds.iter().map(|f| {
+                    let flag = if f["is_low"].as_bool().unwrap_or(false) { " <- LOW" } else { "" };
+                    vec![
+                        f["feed_name"].as_str().unwrap_or("?").to_string(),
+                        f["read"].as_u64().unwrap_or(0).to_string(),
+                        f["opened"].as_u64().unwrap_or(0).to_string(),
+                        f["skipped"].as_u64().unwrap_or(0).to_string(),
+                        format!("{:.0}%{flag}", f["engagement_pct"].as_f64().unwrap_or(0.0)),
+                    ]
+                }).collect();
+                print_table(&["FEED", "READ", "OPEN", "SKIP", "ENGAGEMENT"], &rows);
+            }
         }
         Ok(())
     }

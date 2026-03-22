@@ -7,8 +7,8 @@ use native_db::Database;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
 
-use crate::db::*;
-use crate::output::*;
+use crate::shared::db::*;
+use crate::shared::output::*;
 
 #[derive(Serialize)]
 pub struct Digest {
@@ -62,7 +62,7 @@ pub async fn digest_core(db: Arc<Database<'static>>, since: String, tag: Option<
         for fid in feed_ids {
             let items = grouped.remove(&fid).unwrap_or_default();
             let feed: Option<Feed> = r.get().primary(fid.clone()).ok().flatten();
-            let feed_title = feed.and_then(|f| f.title).unwrap_or_else(|| fid.clone());
+            let feed_title = feed.as_ref().map(|f| f.display_title().to_string()).unwrap_or_else(|| fid.clone());
             total += items.len();
             let digest_items = items.iter().map(|i| DigestItem {
                 id: i.id.clone(), title: i.title.clone().unwrap_or("(untitled)".into()),

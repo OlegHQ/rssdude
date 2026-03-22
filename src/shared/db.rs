@@ -48,6 +48,22 @@ pub struct Feed {
     pub last_modified: Option<String>,
     #[secondary_key(optional)]
     pub folder_id: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub error_count: u32,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
+    #[serde(default)]
+    pub custom_title: Option<String>,
+}
+
+impl Feed {
+    pub fn display_title(&self) -> &str {
+        self.custom_title.as_deref()
+            .or(self.title.as_deref())
+            .unwrap_or(&self.url)
+    }
 }
 
 impl From<FeedV1> for Feed {
@@ -63,6 +79,10 @@ impl From<FeedV1> for Feed {
             etag: old.etag,
             last_modified: old.last_modified,
             folder_id: None,
+            last_error: None,
+            error_count: 0,
+            last_success_at: None,
+            custom_title: None,
         }
     }
 }
@@ -99,10 +119,24 @@ pub struct Item {
     pub summary: Option<String>,
     pub published_at: Option<String>,
     pub fetched_at: String,
+    #[serde(default)]
+    pub full_content: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 #[native_model(id = 3, version = 1)]
+#[native_db]
+pub struct MarkV1 {
+    #[primary_key]
+    pub item_id: String,
+    pub read: bool,
+    pub starred: bool,
+    pub note: Option<String>,
+    pub marked_at: String,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[native_model(id = 3, version = 2, from = MarkV1)]
 #[native_db]
 pub struct Mark {
     #[primary_key]
@@ -111,6 +145,37 @@ pub struct Mark {
     pub starred: bool,
     pub note: Option<String>,
     pub marked_at: String,
+    pub read_at: Option<String>,
+    pub opened_at: Option<String>,
+    #[serde(default)]
+    pub read_later: bool,
+}
+
+impl From<MarkV1> for Mark {
+    fn from(old: MarkV1) -> Self {
+        Mark {
+            item_id: old.item_id,
+            read: old.read,
+            starred: old.starred,
+            note: old.note,
+            marked_at: old.marked_at,
+            read_at: None,
+            opened_at: None,
+            read_later: false,
+        }
+    }
+}
+
+impl From<Mark> for MarkV1 {
+    fn from(new: Mark) -> Self {
+        MarkV1 {
+            item_id: new.item_id,
+            read: new.read,
+            starred: new.starred,
+            note: new.note,
+            marked_at: new.marked_at,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
@@ -125,6 +190,52 @@ pub struct Folder {
     pub created_at: String,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[native_model(id = 5, version = 1)]
+#[native_db]
+pub struct Board {
+    #[primary_key]
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[native_model(id = 6, version = 1)]
+#[native_db]
+pub struct BoardItem {
+    #[primary_key]
+    pub id: String,
+    #[secondary_key]
+    pub board_id: String,
+    pub item_id: String,
+    pub added_at: String,
+    pub note: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[native_model(id = 7, version = 1)]
+#[native_db]
+pub struct SavedSearch {
+    #[primary_key]
+    pub id: String,
+    pub name: String,
+    pub query: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[native_model(id = 8, version = 1)]
+#[native_db]
+pub struct MuteFilter {
+    #[primary_key]
+    pub id: String,
+    pub pattern: String,
+    pub filter_type: String,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // Static model registry
 // ---------------------------------------------------------------------------
@@ -134,8 +245,13 @@ pub static MODELS: Lazy<Models> = Lazy::new(|| {
     models.define::<FeedV1>().expect("FeedV1 model");
     models.define::<Feed>().expect("Feed model");
     models.define::<Item>().expect("Item model");
+    models.define::<MarkV1>().expect("MarkV1 model");
     models.define::<Mark>().expect("Mark model");
     models.define::<Folder>().expect("Folder model");
+    models.define::<Board>().expect("Board model");
+    models.define::<BoardItem>().expect("BoardItem model");
+    models.define::<SavedSearch>().expect("SavedSearch model");
+    models.define::<MuteFilter>().expect("MuteFilter model");
     models
 });
 
@@ -283,6 +399,8 @@ pub struct ItemJson {
     pub read: bool,
     pub starred: bool,
     pub note: Option<String>,
+    pub read_at: Option<String>,
+    pub opened_at: Option<String>,
 }
 
 impl ItemJson {
@@ -301,6 +419,71 @@ impl ItemJson {
             read: mark.is_some_and(|m| m.read),
             starred: mark.is_some_and(|m| m.starred),
             note: mark.and_then(|m| m.note.clone()),
+            read_at: mark.and_then(|m| m.read_at.clone()),
+            opened_at: mark.and_then(|m| m.opened_at.clone()),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BoardJson {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub item_count: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SavedSearchJson {
+    pub id: String,
+    pub name: String,
+    pub query: String,
+    pub created_at: String,
+}
+
+impl From<&SavedSearch> for SavedSearchJson {
+    fn from(s: &SavedSearch) -> Self {
+        Self { id: s.id.clone(), name: s.name.clone(), query: s.query.clone(), created_at: s.created_at.clone() }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MuteFilterJson {
+    pub id: String,
+    pub pattern: String,
+    pub filter_type: String,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
+impl From<&MuteFilter> for MuteFilterJson {
+    fn from(f: &MuteFilter) -> Self {
+        Self {
+            id: f.id.clone(), pattern: f.pattern.clone(), filter_type: f.filter_type.clone(),
+            expires_at: f.expires_at.clone(), created_at: f.created_at.clone(),
+        }
+    }
+}
+
+/// Check if an item is muted by any active filter.
+pub fn is_muted(item: &Item, feed: Option<&Feed>, filters: &[MuteFilter]) -> bool {
+    let now = chrono::Utc::now().to_rfc3339();
+    for f in filters {
+        if f.expires_at.as_ref().is_some_and(|exp| exp.as_str() < now.as_str()) { continue; }
+        let pattern = f.pattern.to_lowercase();
+        match f.filter_type.as_str() {
+            "title" => {
+                if item.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&pattern)) { return true; }
+            }
+            "feed" => {
+                if feed.is_some_and(|f| f.display_title().to_lowercase().contains(&pattern) || f.url.to_lowercase().contains(&pattern)) { return true; }
+            }
+            _ => {
+                // "keyword" or default: match title or content
+                if item.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&pattern)) { return true; }
+                if item.summary.as_ref().is_some_and(|s| s.to_lowercase().contains(&pattern)) { return true; }
+            }
+        }
+    }
+    false
 }

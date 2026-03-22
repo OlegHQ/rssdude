@@ -6,8 +6,8 @@ use chrono::Utc;
 use native_db::Database;
 use tokio::task::spawn_blocking;
 
-use crate::db::*;
-use crate::output::*;
+use crate::shared::db::*;
+use crate::shared::output::*;
 
 pub struct ItemsQuery {
     pub limit: usize,
@@ -92,11 +92,16 @@ pub async fn read_item_core(db: Arc<Database<'static>>, id: String) -> Result<It
         drop(r);
 
         let rw = db.rw_transaction()?;
+        let now = Utc::now().to_rfc3339();
+        let was_read = mark.as_ref().is_some_and(|m| m.read);
         let new_mark = Mark {
             item_id: item.id.clone(), read: true,
             starred: mark.as_ref().is_some_and(|m| m.starred),
             note: mark.as_ref().and_then(|m| m.note.clone()),
-            marked_at: Utc::now().to_rfc3339(),
+            read_at: if !was_read { Some(now.clone()) } else { mark.as_ref().and_then(|m| m.read_at.clone()) },
+            opened_at: mark.as_ref().and_then(|m| m.opened_at.clone()),
+            read_later: mark.as_ref().is_some_and(|m| m.read_later),
+            marked_at: now,
         };
         let _: Option<Mark> = rw.upsert(new_mark.clone())?;
         rw.commit()?;

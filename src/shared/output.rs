@@ -12,44 +12,19 @@ pub fn print_json<T: Serialize>(data: &T) {
 
 /// Print aligned table with headers.
 ///
-/// Column widths are calculated from headers and data. Columns are left-aligned
-/// with 2-space gaps. Prints "No results." if rows is empty.
+/// Prints "No results." if rows is empty.
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
     if rows.is_empty() {
         println!("No results.");
         return;
     }
-
-    // Calculate column widths
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    use tabled::{builder::Builder, settings::Style};
+    let mut builder = Builder::default();
+    builder.push_record(headers.iter().map(|s| s.to_string()));
     for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
-            }
-        }
+        builder.push_record(row.iter().map(|s| s.to_string()));
     }
-
-    // Print header
-    let header_line: Vec<String> = headers
-        .iter()
-        .enumerate()
-        .map(|(i, h)| format!("{:<width$}", h, width = widths[i]))
-        .collect();
-    println!("{}", header_line.join("  "));
-
-    // Print rows
-    for row in rows {
-        let line: Vec<String> = row
-            .iter()
-            .enumerate()
-            .map(|(i, cell)| {
-                let w = widths.get(i).copied().unwrap_or(cell.len());
-                format!("{:<width$}", cell, width = w)
-            })
-            .collect();
-        println!("{}", line.join("  "));
-    }
+    println!("{}", builder.build().with(Style::blank()));
 }
 
 /// Convert an ISO 8601 datetime string to a human-readable relative time string
@@ -85,6 +60,42 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration> {
         .map_err(|e| anyhow::anyhow!("invalid duration {s:?}: {e}"))?;
     chrono::Duration::from_std(std_dur)
         .map_err(|e| anyhow::anyhow!("duration out of range: {e}"))
+}
+
+/// Convert HTML to plain text, wrapped to the given width.
+pub fn strip_html(html: &str, width: usize) -> String {
+    html2text::from_read(html.as_bytes(), width.max(20)).trim().to_string()
+}
+
+/// Print item detail view (Source/Title/Published/URL/body).
+pub fn print_item_detail(source: &str, title: &str, published: &str, url: &str, body: &str) {
+    println!("Source:    {source}");
+    println!("Title:     {title}");
+    println!("Published: {published}");
+    println!("URL:       {url}");
+    println!("---");
+    println!("{body}");
+}
+
+/// Format an item for export in the given format (md, json, text/txt).
+pub fn format_item_export(
+    title: &str, source: &str, published: &str, url: &str,
+    note: &str, content: &str, format: &str,
+) -> String {
+    match format {
+        "md" | "markdown" => {
+            let mut s = format!("# {title}\n\n**Source:** {source}\n**Published:** {published}\n**URL:** {url}\n");
+            if !note.is_empty() { s.push_str(&format!("**Note:** {note}\n")); }
+            s.push_str(&format!("\n---\n\n{content}"));
+            s
+        }
+        _ => {
+            let mut s = format!("{title}\nSource: {source}\nPublished: {published}\nURL: {url}\n");
+            if !note.is_empty() { s.push_str(&format!("Note: {note}\n")); }
+            s.push_str(&format!("\n{content}"));
+            s
+        }
+    }
 }
 
 /// Parse datetime strings in multiple formats (RFC 3339, ISO 8601 variants).

@@ -135,7 +135,18 @@ impl App {
                     },
                 }));
             }
-            _ => self.set_flash("Select a feed or folder to delete.".to_string(), true),
+            SidebarKind::Board(board_id) => {
+                let name = self.data.as_ref()
+                    .and_then(|d| d.boards.iter().find(|b| b.id == board_id))
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| "board".into());
+                self.modal = Some(Modal::Confirm(ConfirmModal {
+                    title: "Delete board".into(),
+                    body: format!("Delete board \"{name}\"?"),
+                    action: ConfirmAction::DeleteBoard { board_id },
+                }));
+            }
+            _ => self.set_flash("Select a feed, folder, or board to delete.".to_string(), true),
         }
     }
 
@@ -227,6 +238,36 @@ impl App {
         }));
     }
 
+    pub(super) fn open_mark_all_read_confirm(&mut self) {
+        let scope = self.selected_scope();
+        let (label, scope_str, scope_id) = match &scope {
+            SidebarKind::All => ("all items".to_string(), "all".to_string(), None),
+            SidebarKind::Feed(id) => {
+                let name = self.data.as_ref()
+                    .and_then(|d| d.feed_lookup.get(id))
+                    .map(helpers::feed_label)
+                    .unwrap_or_else(|| "feed".into());
+                (name, "feed".to_string(), Some(id.clone()))
+            }
+            SidebarKind::Folder(id) => {
+                let name = self.data.as_ref()
+                    .and_then(|d| d.folders.iter().find(|f| f.id == *id))
+                    .map(|f| f.name.clone())
+                    .unwrap_or_else(|| "folder".into());
+                (name, "folder".to_string(), Some(id.clone()))
+            }
+            _ => {
+                self.set_flash("Mark all read works on All, Feed, or Folder.".into(), true);
+                return;
+            }
+        };
+        self.modal = Some(Modal::Confirm(ConfirmModal {
+            title: "Mark all read".into(),
+            body: format!("Mark all items in \"{label}\" as read?"),
+            action: ConfirmAction::MarkAllRead { scope: scope_str, scope_id },
+        }));
+    }
+
     pub(super) fn open_export_picker(&mut self) {
         let Some(item) = self.current_item() else {
             self.set_flash("Select an item first.".to_string(), true);
@@ -242,6 +283,61 @@ impl App {
             entries,
             selected: 0,
             purpose: PickerPurpose::ExportItem { item_id: item.item.id.clone() },
+        }));
+    }
+
+    pub(super) fn open_create_board_modal(&mut self) {
+        self.modal = Some(Modal::Input(InputModal {
+            title: "Create board".into(),
+            hint: "Name for the new board".into(),
+            fields: vec![InputField { label: "Name".into(), value: String::new() }],
+            active: 0,
+            purpose: InputPurpose::CreateBoard,
+        }));
+    }
+
+    pub(super) fn open_import_modal(&mut self) {
+        self.modal = Some(Modal::Input(InputModal {
+            title: "Import OPML".into(),
+            hint: "Path to .opml file".into(),
+            fields: vec![InputField { label: "File".into(), value: String::new() }],
+            active: 0,
+            purpose: InputPurpose::ImportOpml,
+        }));
+    }
+
+    pub(super) fn open_create_watch_modal(&mut self) {
+        self.modal = Some(Modal::Input(InputModal {
+            title: "Create watch".into(),
+            hint: "Saved search name and query".into(),
+            fields: vec![
+                InputField { label: "Name".into(), value: String::new() },
+                InputField { label: "Query".into(), value: String::new() },
+            ],
+            active: 0,
+            purpose: InputPurpose::CreateWatch,
+        }));
+    }
+
+    pub(super) fn open_board_picker_for_current(&mut self) {
+        let Some(item) = self.current_item() else {
+            self.set_flash("Select an item first.".into(), true);
+            return;
+        };
+        let Some(ref data) = self.data else { return; };
+        let entries: Vec<PickerEntry> = data.boards.iter().map(|b| PickerEntry {
+            label: b.name.clone(),
+            folder_id: Some(b.id.clone()),
+        }).collect();
+        if entries.is_empty() {
+            self.set_flash("No boards. Press B to create one.".into(), true);
+            return;
+        }
+        self.modal = Some(Modal::Picker(PickerModal {
+            title: "Add to board".into(),
+            entries,
+            selected: 0,
+            purpose: PickerPurpose::AddToBoard { item_id: item.item.id },
         }));
     }
 }

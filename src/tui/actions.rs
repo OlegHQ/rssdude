@@ -51,14 +51,62 @@ impl App {
             self.set_flash("Select an item first.".to_string(), true);
             return;
         };
-        let Some(url) = item.item.link else {
+        let Some(url) = item.item.link.clone() else {
             self.set_flash("This item has no link.".to_string(), true);
             return;
         };
         match Command::new("open").arg(&url).spawn() {
-            Ok(_) => self.set_flash(format!("Opened {url}"), false),
+            Ok(_) => {
+                self.set_flash(format!("Opened {url}"), false);
+                let db = Arc::clone(&self.db);
+                self.spawn_action(true, data::toggle_mark_action(db, item.item.id, data::ToggleField::Read));
+            }
             Err(err) => self.set_flash(format!("Failed to open link: {err}"), true),
         }
+    }
+
+    pub(super) fn toggle_current_read_later(&mut self) {
+        let Some(item) = self.current_item() else {
+            self.set_flash("Select an item first.".into(), true);
+            return;
+        };
+        let db = Arc::clone(&self.db);
+        self.spawn_action(true, data::toggle_read_later_action(db, item.item.id));
+    }
+
+    pub(super) fn fetch_full_article(&mut self) {
+        let Some(item) = self.current_item() else {
+            self.set_flash("Select an item first.".into(), true);
+            return;
+        };
+        let db = Arc::clone(&self.db);
+        self.spawn_action(true, data::fetch_full_article_action(db, item.item.id));
+    }
+
+    pub(super) fn bulk_mark_read(&mut self) {
+        let ids: Vec<String> = self.selected_items.drain().collect();
+        let db = Arc::clone(&self.db);
+        let count = ids.len();
+        self.spawn_action(true, async move {
+            for id in ids {
+                let _ = data::toggle_mark_action(Arc::clone(&db), id, data::ToggleField::Read).await;
+            }
+            Ok(format!("Marked {count} items as read."))
+        });
+        self.visual_mode = false;
+    }
+
+    pub(super) fn bulk_star(&mut self) {
+        let ids: Vec<String> = self.selected_items.drain().collect();
+        let db = Arc::clone(&self.db);
+        let count = ids.len();
+        self.spawn_action(true, async move {
+            for id in ids {
+                let _ = data::toggle_mark_action(Arc::clone(&db), id, data::ToggleField::Star).await;
+            }
+            Ok(format!("Starred {count} items."))
+        });
+        self.visual_mode = false;
     }
 
     pub(super) fn submit_input_modal(&mut self, modal: InputModal) {
@@ -104,6 +152,25 @@ impl App {
                 let note = values.first().cloned().unwrap_or_default();
                 let db = Arc::clone(&self.db);
                 self.spawn_action(true, data::save_note_action(db, item_id, note));
+            }
+            InputPurpose::CreateBoard => {
+                let name = values.first().cloned().unwrap_or_default();
+                if name.is_empty() { self.set_flash("Board name cannot be empty.".into(), true); return; }
+                let db = Arc::clone(&self.db);
+                self.spawn_action(true, data::create_board_action(db, name));
+            }
+            InputPurpose::ImportOpml => {
+                let path = values.first().cloned().unwrap_or_default();
+                if path.is_empty() { self.set_flash("File path cannot be empty.".into(), true); return; }
+                let db = Arc::clone(&self.db);
+                self.spawn_action(true, data::import_opml_action(db, path));
+            }
+            InputPurpose::CreateWatch => {
+                let name = values.first().cloned().unwrap_or_default();
+                let query = values.get(1).cloned().unwrap_or_default();
+                if name.is_empty() || query.is_empty() { self.set_flash("Name and query required.".into(), true); return; }
+                let db = Arc::clone(&self.db);
+                self.spawn_action(true, data::create_watch_action(db, name, query));
             }
         }
     }
@@ -161,6 +228,12 @@ impl App {
                 let format_name = format_name.to_string();
                 self.spawn_action(false, helpers::export_item_to_file(db, item_id, ext, format_name));
             }
+            PickerPurpose::AddToBoard { item_id } => {
+                if let Some(board_id) = choice.folder_id.clone() {
+                    let db = Arc::clone(&self.db);
+                    self.spawn_action(true, data::add_to_board_action(db, board_id, item_id));
+                }
+            }
         }
     }
 
@@ -172,6 +245,12 @@ impl App {
             }
             ConfirmAction::DeleteFolder { folder_id, recursive } => {
                 self.spawn_action(true, data::delete_folder_action(db, folder_id, recursive));
+            }
+            ConfirmAction::MarkAllRead { scope, scope_id } => {
+                self.spawn_action(true, data::mark_all_read_action(db, scope, scope_id));
+            }
+            ConfirmAction::DeleteBoard { board_id } => {
+                self.spawn_action(true, data::delete_board_action(db, board_id));
             }
         }
     }

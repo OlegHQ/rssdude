@@ -7,12 +7,37 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
+    #[serde(default)]
+    pub retention: RetentionConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { theme: default_theme() }
+    }
+}
+
+fn default_theme() -> String { "dark".into() }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Mark items older than this as read (e.g. "30d")
+    pub auto_mark_read_after: Option<String>,
+    /// Delete items older than this, except starred (e.g. "90d")
+    pub auto_delete_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ServerConfig {
     /// Address to bind when running as server, or to connect to as client.
-    /// Example: "127.0.0.1:8484"
     pub address: Option<String>,
     /// Optional bearer token for authentication.
     pub token: Option<String>,

@@ -46,16 +46,30 @@ pub(super) fn push_folder_entries(
     feeds_by_folder: &HashMap<Option<String>, Vec<&Feed>>,
     folders_by_parent: &HashMap<Option<String>, Vec<&Folder>>,
     feed_stats: &HashMap<String, FeedStats>,
+    collapsed: &HashSet<String>,
 ) {
     entries.push(SidebarEntry {
         kind: SidebarKind::Folder(folder.id.clone()),
         label: folder.name.clone(),
         unread: folder_unread(&folder.id, feeds_by_folder, folders_by_parent, feed_stats),
         depth,
+        has_error: false,
+        is_last_child: false,
     });
 
-    if let Some(feeds) = feeds_by_folder.get(&Some(folder.id.clone())) {
+    if collapsed.contains(&folder.id) {
+        return;
+    }
+
+    let child_feeds = feeds_by_folder.get(&Some(folder.id.clone()));
+    let child_folders = folders_by_parent.get(&Some(folder.id.clone()));
+    let total_children = child_feeds.map(|f| f.len()).unwrap_or(0)
+        + child_folders.map(|f| f.len()).unwrap_or(0);
+    let mut child_idx = 0;
+
+    if let Some(feeds) = child_feeds {
         for feed in feeds {
+            child_idx += 1;
             entries.push(SidebarEntry {
                 kind: SidebarKind::Feed(feed.id.clone()),
                 label: feed_label(feed),
@@ -64,12 +78,16 @@ pub(super) fn push_folder_entries(
                     .map(|stats| stats.unread)
                     .unwrap_or(0),
                 depth: depth + 1,
+                has_error: feed.error_count > 0,
+                is_last_child: child_idx == total_children,
             });
         }
     }
 
-    if let Some(children) = folders_by_parent.get(&Some(folder.id.clone())) {
+    if let Some(children) = child_folders {
         for child in children {
+            child_idx += 1;
+            // Mark the folder entry as last child if it's the last
             push_folder_entries(
                 child,
                 depth + 1,
@@ -77,7 +95,16 @@ pub(super) fn push_folder_entries(
                 feeds_by_folder,
                 folders_by_parent,
                 feed_stats,
+                collapsed,
             );
+            // Set is_last_child on the folder entry we just pushed
+            if child_idx == total_children {
+                if let Some(entry) = entries.iter_mut().rev()
+                    .find(|e| matches!(&e.kind, SidebarKind::Folder(id) if *id == child.id))
+                {
+                    entry.is_last_child = true;
+                }
+            }
         }
     }
 }
@@ -145,6 +172,9 @@ pub(super) fn item_matches_scope(
         SidebarKind::Folder(_) => feed
             .and_then(|feed| feed.folder_id.as_ref())
             .is_some_and(|folder_id| descendants.is_some_and(|set| set.contains(folder_id))),
+        SidebarKind::ReadLater => mark.is_some_and(|m| m.read_later),
+        SidebarKind::RecentlyRead => mark.is_some_and(|m| m.read),
+        SidebarKind::Board(_) | SidebarKind::Watch(_) => true, // handled in visible_items
     }
 }
 
@@ -224,7 +254,7 @@ pub(super) fn wrap_text(s: &str, width: usize) -> Vec<String> {
 }
 
 pub(super) async fn compute_digest(db: Arc<Database<'static>>, since: &str) -> Result<Vec<String>> {
-    let dur = crate::output::parse_duration(since)?;
+    let dur = crate::shared::output::parse_duration(since)?;
     let cutoff = Utc::now().naive_utc() - dur;
 
     spawn_blocking(move || {
@@ -348,7 +378,7 @@ pub(super) async fn export_item_to_file(
             s
         }
         "json" => {
-            let json = crate::db::ItemJson::from_parts(&item, feed.as_ref(), mark.as_ref());
+            let json = crate::shared::db::ItemJson::from_parts(&item, feed.as_ref(), mark.as_ref());
             serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string())
         }
         _ => {

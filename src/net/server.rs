@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use crate::commands;
 use crate::commands::read::ItemsQuery;
-use crate::db::*;
+use crate::shared::db::*;
 
 // ---------------------------------------------------------------------------
 // Server state & error handling
@@ -68,6 +68,7 @@ pub fn router(db: Arc<Database<'static>>, token: Option<String>) -> Router {
         .route("/api/digest", get(get_digest))
         .route("/api/trending", get(get_trending))
         .route("/api/match", get(match_keywords))
+        .route("/api/stats", get(get_stats))
         .route("/api/folders", get(list_folders).post(create_folder))
         .route("/api/folders/{id}", delete(delete_folder))
         .route("/api/folders/{id}/rename", put(rename_folder))
@@ -118,7 +119,7 @@ struct MoveFeedReq { folder_id: String }
 
 async fn move_feed(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(req): Json<MoveFeedReq>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let (ft, fn_) = commands::feed_mgmt::move_to_folder_core(s.db, id, req.folder_id).await?;
+    let (ft, fn_) = commands::feed_mgmt::move_to_folder_core(s.db, id, Some(req.folder_id)).await?;
     Ok(Json(serde_json::json!({"feed_title": ft, "folder_name": fn_})))
 }
 
@@ -231,6 +232,24 @@ async fn match_keywords(State(s): State<AppState>, headers: axum::http::HeaderMa
     Ok(Json(serde_json::json!(results)))
 }
 
+// --- Stats ---
+
+#[derive(Deserialize)]
+struct StatsQueryParams {
+    #[serde(default = "default_stats_since")]
+    since: String,
+    dead: Option<f32>,
+}
+fn default_stats_since() -> String { "30d".to_string() }
+
+async fn get_stats(State(s): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<StatsQueryParams>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let dur = crate::shared::output::parse_duration(&q.since)?;
+    let days = dur.num_days().max(1) as u32;
+    let result = commands::stats::stats_core(s.db, days, q.dead).await?;
+    Ok(Json(serde_json::json!(result)))
+}
+
 // --- Folders ---
 
 #[derive(Deserialize)]
@@ -262,7 +281,7 @@ struct MoveFolderReq { parent_id: String }
 
 async fn move_folder(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(req): Json<MoveFolderReq>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let folder = commands::folder::move_folder_core(s.db, id, req.parent_id).await?;
+    let folder = commands::folder::move_folder_core(s.db, id, Some(req.parent_id)).await?;
     Ok(Json(serde_json::json!(FolderJson::from(&folder))))
 }
 

@@ -21,7 +21,7 @@ Binary: `target/release/rssdude`
 - Rename, delete, restructure freely. No shims, no deprecated wrappers, no `_old` suffixes.
 - If a function signature should change, change it everywhere. Don't add a new function alongside the old one.
 - If a type should change, change it. Don't keep the old type around.
-- If an API endpoint changes shape, update client.rs to match. Don't version the API.
+- If an API endpoint changes shape, update `net/client.rs` to match. Don't version the API.
 - Never add compatibility layers. The cost of breaking is zero; the cost of compat code is permanent.
 
 Before writing code, exhaust these options in order:
@@ -47,6 +47,7 @@ Before writing code, exhaust these options in order:
 | HTML to text | `html2text` | Custom `strip_html()` |
 | Stopwords | `stop-words` | Hardcoded `STOPWORDS` array |
 | Tree operations | `indextree` | Manual BFS/recursive tree traversal |
+| TUI snapshot testing | `insta` (dev-dep) | Manual visual verification |
 
 When evaluating a new dependency: prefer crates with >1M downloads, recent maintenance, and minimal transitive deps. A 10-line dependency is better than a 10-line hand-rolled function because the crate handles edge cases you haven't thought of.
 
@@ -62,11 +63,14 @@ grep -r "function_name_or_key_logic_phrase" src/
 If similar logic exists anywhere, extract it to a shared location instead of writing new code.
 
 **Known duplication hotspots** (FIXED — verify they stay deduplicated):
-- `parse_datetime()` — ONLY in output.rs. If you see it anywhere else, delete it.
-- `collect_descendant_ids()` — ONLY in db.rs. If you see it anywhere else, delete it.
-- `entries_to_items()` — ONLY in feed.rs. If you see entry→Item loops anywhere else, delete them.
-- Server business logic — server.rs calls `*_core()` functions. If you see DB transactions in server.rs, extract to commands/.
-- Unread count calculation — still duplicated in sync.rs, folder.rs, tui.rs. Next target for extraction.
+- `parse_datetime()` — ONLY in `shared/output.rs`. If you see it anywhere else, delete it.
+- `collect_descendant_ids()` — ONLY in `shared/db.rs`. If you see it anywhere else, delete it.
+- `entries_to_items()` — ONLY in `shared/feed.rs`. If you see entry→Item loops anywhere else, delete them.
+- `compute_feed_stats()` — ONLY in `shared/db.rs`. Unread count calculation is centralized here.
+- `strip_html()` — ONLY in `shared/output.rs`. If you see `html2text::from_read` anywhere else, replace with this.
+- Server business logic — `net/server.rs` calls `*_core()` functions. If you see DB transactions in server.rs, extract to commands/.
+- Digest/trending — TUI calls `commands::discover::*_core()`. If you see reimplemented word-frequency or digest logic in tui/, delete it.
+- TUI sync — calls `sync_core()` with a progress callback. If you see duplicated fetch/store logic in tui/, delete it.
 
 ### Step 2: Library Replacement Check
 For any hand-rolled utility function, ask: "Does a well-maintained crate do this?" If yes, replace.
@@ -78,10 +82,10 @@ If you see the same 3+ line pattern repeated, extract it. Common patterns to wat
 - Build table rows from model structs
 
 ### Step 4: Verify No Business Logic Leaks
-- `server.rs` should only: parse HTTP request → call command function → serialize response
-- `client.rs` should only: serialize request → HTTP call → deserialize response
+- `net/server.rs` should only: parse HTTP request → call command function → serialize response
+- `net/client.rs` should only: serialize request → HTTP call → deserialize response
 - `main.rs` should only: parse CLI args → dispatch to command or client
-- All business logic lives in `commands/` and shared helpers in `db.rs`, `feed.rs`, `output.rs`
+- All business logic lives in `commands/` and shared helpers in `shared/`
 
 ### Step 5: Test Audit
 Only useful tests. Delete tests that:
@@ -101,6 +105,16 @@ A test is useful ONLY if:
 
 **Do not write tests for**: simple getters, trivial pattern matches, standard library wrappers, pure arithmetic, BFS/DFS on small trees, functions under 5 lines with obvious behavior.
 
+### Step 5b: TUI Snapshot Verification
+After ANY change to `src/tui/render.rs`, `src/tui/modals.rs`, or `src/tui/theme.rs`:
+
+1. Run snapshot tests: `LIBRARY_PATH="/opt/homebrew/opt/libiconv/lib" cargo test tui::tests`
+2. Review visual diffs: `cargo insta review`
+3. Accept if correct, fix render code if not
+4. Commit `.snap` files, never commit `.snap.new` files
+
+See the `tui-snapshots` skill (`.claude/skills/tui-snapshots/SKILL.md`) for full guide on writing snapshot tests, mock fixtures, and color verification.
+
 ### Step 6: Line Count Check
 After completing a change, verify:
 - No function exceeds 40 lines (excluding struct definitions)
@@ -114,17 +128,19 @@ These shared helpers exist. Use them. Do not duplicate.
 
 ### Shared Helpers
 ```rust
-// output.rs — datetime/duration/formatting
+// shared/output.rs — datetime/duration/formatting/html
 output::parse_datetime(s: &str) -> Result<NaiveDateTime>    // THE ONLY datetime parser
 output::parse_duration(s: &str) -> Result<Duration>          // "24h", "7d", "1w"
 output::time_ago(iso: &str) -> String                        // relative time
+output::strip_html(html: &str, width: usize) -> String      // THE ONLY HTML→text converter
 output::print_table(headers, rows)                           // table output
 output::print_json(data)                                     // JSON output
 
-// db.rs — folder tree operations
+// shared/db.rs — folder tree operations + stats
 db::collect_descendant_ids(folders, root_id) -> HashSet<String>  // BFS folder tree
+db::compute_feed_stats(items, marks) -> HashMap<String, FeedStatsEntry>  // per-feed unread/starred
 
-// feed.rs — feed entry conversion
+// shared/feed.rs — feed entry conversion
 feed::entries_to_items(entries, feed_id, now) -> Vec<Item>   // THE ONLY entry→Item converter
 ```
 
@@ -173,25 +189,35 @@ async fn foo_handler(State(s), ...) -> ApiResult<Value> {
 ```
 src/
   main.rs              — clap CLI, command dispatch, client/server mode routing
-  db.rs                — models, DB setup, transaction wrappers, shared query helpers
-  config.rs            — config.toml loading (server address, token, bind)
-  server.rs            — axum HTTP server, thin handlers that call commands/
-  client.rs            — HTTP client, thin wrappers (macro-driven)
-  feed.rs              — async HTTP fetch + feed-rs parsing + entries_to_items()
-  output.rs            — print_table, print_json, time_ago, parse_duration, parse_datetime
-  tui.rs               — ratatui interactive terminal UI
-  commands/
+  shared/              — core infrastructure shared across all layers
+    db.rs              — models, DB setup, transaction wrappers, shared query helpers
+    config.rs          — config.toml loading (server address, token, bind)
+    feed.rs            — async HTTP fetch + feed-rs parsing + entries_to_items()
+    output.rs          — print_table, print_json, time_ago, parse_duration, parse_datetime
+  commands/            — business logic (core functions + CLI wrappers)
     feed_mgmt.rs       — add, list, remove (with --yes), move_to_folder
     folder.rs          — create, list (tree), rename, move_folder, delete
     sync.rs            — sync, status (with per-folder stats)
     read.rs            — items (with --folder filter), read_item (with --raw), search
     curate.rs          — mark, starred, export
     discover.rs        — digest (with --tag), trending, match_keywords
+  tui/                 — ratatui interactive terminal UI
+    mod.rs             — main event loop, app state, types
+    state.rs           — state management, refresh, sync orchestration
+    render.rs          — widget rendering, sidebar/items/preview panes
+    input.rs           — keyboard/mouse input handling
+    helpers.rs         — utility functions, text wrapping, filtering
+    data.rs            — data loading, sync task, DB action wrappers
+    modals.rs          — input/picker/confirm modal dialogs
+    actions.rs         — action dispatch (digest, trending, mark, open)
+  net/                 — HTTP server + client for remote access
+    server.rs          — axum HTTP server, thin handlers that call commands/
+    client.rs          — HTTP client, thin wrappers per endpoint
 ```
 
 ## Data Model (native_db)
 
-Four models:
+Five models:
 
 - **FeedV1** (id=1, v1): migration source — do not use directly
 - **Feed** (id=1, v2): PK `id`, unique SK `url`, optional SK `folder_id`

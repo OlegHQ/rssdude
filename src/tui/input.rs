@@ -11,12 +11,9 @@ impl App {
                     self.preview_scroll = 0;
                 }
             }
-            Focus::Items => {
+            Focus::Items | Focus::Preview => {
                 self.item_index = self.item_index.saturating_sub(step);
                 self.preview_scroll = 0;
-            }
-            Focus::Preview => {
-                self.preview_scroll = self.preview_scroll.saturating_sub(step as u16);
             }
         }
     }
@@ -33,16 +30,34 @@ impl App {
                     self.preview_scroll = 0;
                 }
             }
-            Focus::Items => {
+            Focus::Items | Focus::Preview => {
                 let items = self.visible_items();
                 let max = items.len().saturating_sub(1);
                 self.item_index = (self.item_index + step).min(max);
                 self.preview_scroll = 0;
             }
-            Focus::Preview => {
-                self.preview_scroll = self.preview_scroll.saturating_add(step as u16);
-            }
         }
+    }
+
+    pub(super) fn scroll_preview_up(&mut self, step: u16) {
+        self.preview_scroll = self.preview_scroll.saturating_sub(step);
+    }
+
+    pub(super) fn scroll_preview_down(&mut self, step: u16) {
+        self.preview_scroll = self.preview_scroll.saturating_add(step);
+    }
+
+    pub(super) fn advance_to_next_unread(&mut self) {
+        let items = self.visible_items();
+        let start = self.item_index + 1;
+        if let Some((offset, _)) = items[start..].iter().enumerate()
+            .find(|(_, item)| !item.mark.as_ref().is_some_and(|m| m.read))
+        {
+            self.item_index = start + offset;
+        } else {
+            self.item_index = (self.item_index + 1).min(items.len().saturating_sub(1));
+        }
+        self.preview_scroll = 0;
     }
 
     pub(super) fn move_to_start(&mut self) {
@@ -52,11 +67,10 @@ impl App {
                 self.item_index = 0;
                 self.preview_scroll = 0;
             }
-            Focus::Items => {
+            Focus::Items | Focus::Preview => {
                 self.item_index = 0;
                 self.preview_scroll = 0;
             }
-            Focus::Preview => self.preview_scroll = 0,
         }
     }
 
@@ -68,12 +82,11 @@ impl App {
                 self.item_index = 0;
                 self.preview_scroll = 0;
             }
-            Focus::Items => {
+            Focus::Items | Focus::Preview => {
                 let len = self.visible_items().len();
                 self.item_index = len.saturating_sub(1);
                 self.preview_scroll = 0;
             }
-            Focus::Preview => self.preview_scroll = u16::MAX / 4,
         }
     }
 
@@ -162,26 +175,76 @@ impl App {
             return;
         }
 
+        self.hover_sidebar = None;
+        self.hover_item = None;
+        self.hover_link = None;
+
         if self.modal.is_some() {
             self.handle_modal_key(key);
             return;
         }
 
         match key.code {
+            KeyCode::Esc => {
+                if self.visual_mode {
+                    self.visual_mode = false;
+                    self.selected_items.clear();
+                }
+            }
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Tab => self.cycle_focus_forward(),
             KeyCode::BackTab => self.cycle_focus_back(),
-            KeyCode::Left | KeyCode::Char('h') => self.cycle_focus_back(),
-            KeyCode::Right | KeyCode::Char('l') => self.cycle_focus_forward(),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Sidebar,
+                    Focus::Items => Focus::Sidebar,
+                    Focus::Preview => Focus::Items,
+                };
+            }
+            KeyCode::Right => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Items,
+                    Focus::Items => Focus::Preview,
+                    Focus::Preview => Focus::Preview,
+                };
+            }
+            KeyCode::Char('l') => {
+                self.focus = match self.focus {
+                    Focus::Sidebar => Focus::Items,
+                    Focus::Items => Focus::Preview,
+                    Focus::Preview => Focus::Preview,
+                };
+            }
+            KeyCode::Char('L') => self.toggle_current_read_later(),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection_up(1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection_down(1),
-            KeyCode::PageUp => self.move_selection_up(10),
-            KeyCode::PageDown => self.move_selection_down(10),
+            KeyCode::PageUp => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_up(self.half_page() as u16 * 2);
+                } else {
+                    self.move_selection_up(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_down(self.half_page() as u16 * 2);
+                } else {
+                    self.move_selection_down(10);
+                }
+            }
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection_down(self.half_page())
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_down(self.half_page() as u16);
+                } else {
+                    self.move_selection_down(self.half_page());
+                }
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection_up(self.half_page())
+                if self.focus == Focus::Preview {
+                    self.scroll_preview_up(self.half_page() as u16);
+                } else {
+                    self.move_selection_up(self.half_page());
+                }
             }
             KeyCode::Home | KeyCode::Char('g') if !key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.move_to_start()
@@ -196,8 +259,42 @@ impl App {
                 Focus::Items => self.open_current_item(),
                 Focus::Preview => self.focus = Focus::Items,
             },
-            KeyCode::Char(' ') => self.toggle_current_read(),
-            KeyCode::Char('*') => self.toggle_current_star(),
+            KeyCode::Char(' ') => {
+                if self.visual_mode {
+                    // Toggle selection on current item, don't advance
+                    if let Some(item) = self.current_item() {
+                        if !self.selected_items.remove(&item.item.id) {
+                            self.selected_items.insert(item.item.id.clone());
+                        }
+                    }
+                } else if self.focus == Focus::Sidebar {
+                    if let Some(SidebarKind::Folder(id)) = self.sidebar_entries().get(self.sidebar_index).map(|e| e.kind.clone()) {
+                        if !self.collapsed_folders.remove(&id) {
+                            self.collapsed_folders.insert(id);
+                        }
+                    }
+                } else if let Some(item) = self.current_item() {
+                    let db = Arc::clone(&self.db);
+                    self.spawn_action(true, data::toggle_mark_action(db, item.item.id, data::ToggleField::Read));
+                    self.advance_to_next_unread();
+                }
+            }
+            KeyCode::Char('v') => {
+                self.visual_mode = !self.visual_mode;
+                if !self.visual_mode { self.selected_items.clear(); }
+            }
+            KeyCode::Char('V') => {
+                self.visual_mode = true;
+                let items = self.visible_items();
+                self.selected_items = items.iter().map(|i| i.item.id.clone()).collect();
+            }
+            KeyCode::Char('*') => {
+                if self.visual_mode && !self.selected_items.is_empty() {
+                    self.bulk_star();
+                } else {
+                    self.toggle_current_star();
+                }
+            }
             KeyCode::Char('N') => self.open_note_modal(),
             KeyCode::Char('o') => self.open_current_link(),
             KeyCode::Char('u') => {
@@ -217,6 +314,26 @@ impl App {
             KeyCode::Char('t') => self.open_tag_picker(),
             KeyCode::Char('d') => self.open_time_picker(),
             KeyCode::Char('E') => self.open_export_picker(),
+            KeyCode::Char('R') => {
+                if self.visual_mode && !self.selected_items.is_empty() {
+                    self.bulk_mark_read();
+                } else {
+                    self.open_mark_all_read_confirm();
+                }
+            }
+            KeyCode::Char('S') => {
+                self.sort_order = if self.sort_order == "newest" { "oldest".into() } else { "newest".into() };
+                self.set_flash(format!("Sort: {}", self.sort_order), false);
+            }
+            KeyCode::Char('=') => {
+                self.dedup = !self.dedup;
+                self.set_flash(format!("Dedup: {}", if self.dedup { "on" } else { "off" }), false);
+            }
+            KeyCode::Char('F') if self.focus == Focus::Preview => self.fetch_full_article(),
+            KeyCode::Char('I') => self.open_import_modal(),
+            KeyCode::Char('b') => self.open_board_picker_for_current(),
+            KeyCode::Char('B') => self.open_create_board_modal(),
+            KeyCode::Char('W') => self.open_create_watch_modal(),
             KeyCode::Char('D') => self.open_digest_overlay(),
             KeyCode::Char('T') => self.open_trending_overlay(),
             KeyCode::Char('?') => self.show_help = true,
@@ -236,6 +353,29 @@ impl App {
         let x = mouse.column;
         let y = mouse.row;
 
+        // Hover tracking — update on every mouse move, no focus change
+        if matches!(mouse.kind, MouseEventKind::Moved) {
+            self.hover_sidebar = None;
+            self.hover_item = None;
+            self.hover_link = None;
+            if helpers::rect_contains(layout.sidebar, x, y) {
+                if let Some(line) = helpers::relative_line(layout.sidebar_inner, y) {
+                    let idx = self.sidebar_offset + line as usize;
+                    if idx < self.sidebar_entries().len() { self.hover_sidebar = Some(idx); }
+                }
+            } else if helpers::rect_contains(layout.items, x, y) {
+                if let Some(line) = helpers::relative_line(layout.items_inner, y) {
+                    let idx = self.items_offset + (line as usize / 2);
+                    let items = self.visible_items();
+                    if idx < items.len() { self.hover_item = Some(idx); }
+                }
+            } else if helpers::rect_contains(layout.preview, x, y) {
+                self.hover_link = self.url_at_position(layout, x, y);
+            }
+            return;
+        }
+
+        // Click/scroll — only these change focus
         if helpers::rect_contains(layout.sidebar, x, y) {
             self.focus = Focus::Sidebar;
             self.last_item_click = None;
@@ -255,10 +395,7 @@ impl App {
                 MouseEventKind::ScrollDown => self.move_selection_down(3),
                 _ => {}
             }
-            return;
-        }
-
-        if helpers::rect_contains(layout.items, x, y) {
+        } else if helpers::rect_contains(layout.items, x, y) {
             self.focus = Focus::Items;
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -285,19 +422,12 @@ impl App {
                 MouseEventKind::ScrollDown => self.move_selection_down(3),
                 _ => {}
             }
-            return;
-        }
-
-        if helpers::rect_contains(layout.preview, x, y) {
+        } else if helpers::rect_contains(layout.preview, x, y) {
             self.focus = Focus::Preview;
             self.last_item_click = None;
             match mouse.kind {
-                MouseEventKind::ScrollUp => {
-                    self.preview_scroll = self.preview_scroll.saturating_sub(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    self.preview_scroll = self.preview_scroll.saturating_add(3);
-                }
+                MouseEventKind::ScrollUp => self.preview_scroll = self.preview_scroll.saturating_sub(3),
+                MouseEventKind::ScrollDown => self.preview_scroll = self.preview_scroll.saturating_add(3),
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(url) = self.url_at_position(layout, x, y) {
                         match Command::new("open").arg(&url).spawn() {
