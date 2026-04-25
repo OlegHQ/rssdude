@@ -17,23 +17,6 @@ use tokio::task::spawn_blocking;
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 #[native_model(id = 1, version = 1)]
 #[native_db]
-pub struct FeedV1 {
-    #[primary_key]
-    pub id: String,
-    #[secondary_key(unique)]
-    pub url: String,
-    pub title: Option<String>,
-    pub description: Option<String>,
-    pub tags: String,
-    pub added_at: String,
-    pub last_synced: Option<String>,
-    pub etag: Option<String>,
-    pub last_modified: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-#[native_model(id = 1, version = 2, from = FeedV1)]
-#[native_db]
 pub struct Feed {
     #[primary_key]
     pub id: String,
@@ -41,7 +24,7 @@ pub struct Feed {
     pub url: String,
     pub title: Option<String>,
     pub description: Option<String>,
-    pub tags: String,
+    pub tags: Vec<String>,
     pub added_at: String,
     pub last_synced: Option<String>,
     pub etag: Option<String>,
@@ -64,42 +47,9 @@ impl Feed {
             .or(self.title.as_deref())
             .unwrap_or(&self.url)
     }
-}
 
-impl From<FeedV1> for Feed {
-    fn from(old: FeedV1) -> Self {
-        Self {
-            id: old.id,
-            url: old.url,
-            title: old.title,
-            description: old.description,
-            tags: old.tags,
-            added_at: old.added_at,
-            last_synced: old.last_synced,
-            etag: old.etag,
-            last_modified: old.last_modified,
-            folder_id: None,
-            last_error: None,
-            error_count: 0,
-            last_success_at: None,
-            custom_title: None,
-        }
-    }
-}
-
-impl From<Feed> for FeedV1 {
-    fn from(new: Feed) -> Self {
-        Self {
-            id: new.id,
-            url: new.url,
-            title: new.title,
-            description: new.description,
-            tags: new.tags,
-            added_at: new.added_at,
-            last_synced: new.last_synced,
-            etag: new.etag,
-            last_modified: new.last_modified,
-        }
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
     }
 }
 
@@ -126,18 +76,6 @@ pub struct Item {
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 #[native_model(id = 3, version = 1)]
 #[native_db]
-pub struct MarkV1 {
-    #[primary_key]
-    pub item_id: String,
-    pub read: bool,
-    pub starred: bool,
-    pub note: Option<String>,
-    pub marked_at: String,
-}
-
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-#[native_model(id = 3, version = 2, from = MarkV1)]
-#[native_db]
 pub struct Mark {
     #[primary_key]
     pub item_id: String,
@@ -151,29 +89,19 @@ pub struct Mark {
     pub read_later: bool,
 }
 
-impl From<MarkV1> for Mark {
-    fn from(old: MarkV1) -> Self {
+impl Mark {
+    /// Create a Mark by preserving fields from an existing one (or defaults).
+    /// Caller mutates specific fields after. `marked_at` is set to now.
+    pub fn from_existing(item_id: String, existing: Option<&Mark>) -> Mark {
         Mark {
-            item_id: old.item_id,
-            read: old.read,
-            starred: old.starred,
-            note: old.note,
-            marked_at: old.marked_at,
-            read_at: None,
-            opened_at: None,
-            read_later: false,
-        }
-    }
-}
-
-impl From<Mark> for MarkV1 {
-    fn from(new: Mark) -> Self {
-        MarkV1 {
-            item_id: new.item_id,
-            read: new.read,
-            starred: new.starred,
-            note: new.note,
-            marked_at: new.marked_at,
+            item_id,
+            read: existing.is_some_and(|m| m.read),
+            starred: existing.is_some_and(|m| m.starred),
+            note: existing.and_then(|m| m.note.clone()),
+            read_at: existing.and_then(|m| m.read_at.clone()),
+            opened_at: existing.and_then(|m| m.opened_at.clone()),
+            read_later: existing.is_some_and(|m| m.read_later),
+            marked_at: chrono::Utc::now().to_rfc3339(),
         }
     }
 }
@@ -242,10 +170,8 @@ pub struct MuteFilter {
 
 pub static MODELS: Lazy<Models> = Lazy::new(|| {
     let mut models = Models::new();
-    models.define::<FeedV1>().expect("FeedV1 model");
     models.define::<Feed>().expect("Feed model");
     models.define::<Item>().expect("Item model");
-    models.define::<MarkV1>().expect("MarkV1 model");
     models.define::<Mark>().expect("Mark model");
     models.define::<Folder>().expect("Folder model");
     models.define::<Board>().expect("Board model");
@@ -344,6 +270,10 @@ pub struct FeedJson {
     pub added_at: String,
     pub last_synced: Option<String>,
     pub folder_id: Option<String>,
+    #[serde(default)]
+    pub folder_name: Option<String>,
+    #[serde(default)]
+    pub item_count: usize,
 }
 
 impl From<&Feed> for FeedJson {
@@ -353,14 +283,12 @@ impl From<&Feed> for FeedJson {
             url: f.url.clone(),
             title: f.title.clone(),
             description: f.description.clone(),
-            tags: if f.tags.is_empty() {
-                vec![]
-            } else {
-                f.tags.split(',').map(|s| s.trim().to_string()).collect()
-            },
+            tags: f.tags.clone(),
             added_at: f.added_at.clone(),
             last_synced: f.last_synced.clone(),
             folder_id: f.folder_id.clone(),
+            folder_name: None,
+            item_count: 0,
         }
     }
 }
@@ -421,46 +349,6 @@ impl ItemJson {
             note: mark.and_then(|m| m.note.clone()),
             read_at: mark.and_then(|m| m.read_at.clone()),
             opened_at: mark.and_then(|m| m.opened_at.clone()),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct BoardJson {
-    pub id: String,
-    pub name: String,
-    pub created_at: String,
-    pub item_count: usize,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SavedSearchJson {
-    pub id: String,
-    pub name: String,
-    pub query: String,
-    pub created_at: String,
-}
-
-impl From<&SavedSearch> for SavedSearchJson {
-    fn from(s: &SavedSearch) -> Self {
-        Self { id: s.id.clone(), name: s.name.clone(), query: s.query.clone(), created_at: s.created_at.clone() }
-    }
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct MuteFilterJson {
-    pub id: String,
-    pub pattern: String,
-    pub filter_type: String,
-    pub expires_at: Option<String>,
-    pub created_at: String,
-}
-
-impl From<&MuteFilter> for MuteFilterJson {
-    fn from(f: &MuteFilter) -> Self {
-        Self {
-            id: f.id.clone(), pattern: f.pattern.clone(), filter_type: f.filter_type.clone(),
-            expires_at: f.expires_at.clone(), created_at: f.created_at.clone(),
         }
     }
 }

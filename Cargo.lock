@@ -2043,7 +2043,6 @@ dependencies = [
  "serde",
  "serde_json",
  "stop-words",
- "strsim",
  "tabled",
  "textwrap",
  "tokio",

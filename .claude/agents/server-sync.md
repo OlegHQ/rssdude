@@ -46,3 +46,4 @@ When you find business logic in server.rs:
 ## Output
 
 Report which handlers are compliant and which violate the rule, with specific line references and fix instructions.
+

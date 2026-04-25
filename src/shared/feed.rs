@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
+use chrono::Utc;
 use feed_rs::parser;
 use once_cell::sync::Lazy;
 use reqwest::header;
 
-use super::db::{gen_id, Item};
+use super::db::{gen_id, Feed, Item};
 
 static HTTP: Lazy<reqwest::Client> = Lazy::new(reqwest::Client::new);
 
@@ -38,6 +39,50 @@ pub fn entries_to_items(entries: &[feed_rs::model::Entry], feed_id: &str, now: &
             }
         })
         .collect()
+}
+
+/// Build a Feed from a successful FetchResult. Used by add_core and opml import.
+pub fn feed_from_fetch_result(url: String, result: &FetchResult, tags: Vec<String>, folder_id: Option<String>) -> (Feed, Vec<Item>) {
+    let now = Utc::now().to_rfc3339();
+    let f = Feed {
+        id: gen_id(),
+        url: url.clone(),
+        title: result.feed.title.as_ref().map(|t| t.content.clone()),
+        description: result.feed.description.as_ref().map(|d| d.content.clone()),
+        tags,
+        added_at: now.clone(),
+        last_synced: Some(now.clone()),
+        etag: result.etag.clone(),
+        last_modified: result.last_modified.clone(),
+        folder_id,
+        last_error: None,
+        error_count: 0,
+        last_success_at: Some(now.clone()),
+        custom_title: None,
+    };
+    let items = entries_to_items(&result.feed.entries, &f.id, &now);
+    (f, items)
+}
+
+/// Build a placeholder Feed for a URL that failed to fetch (e.g. during OPML import).
+pub fn feed_from_failed_fetch(url: String, title: Option<String>, folder_id: Option<String>) -> Feed {
+    let now = Utc::now().to_rfc3339();
+    Feed {
+        id: gen_id(),
+        url,
+        title,
+        description: None,
+        tags: Vec::new(),
+        added_at: now.clone(),
+        last_synced: None,
+        etag: None,
+        last_modified: None,
+        folder_id,
+        last_error: Some("initial fetch failed".into()),
+        error_count: 1,
+        last_success_at: None,
+        custom_title: None,
+    }
 }
 
 /// Parse a feed response: extract caching headers, read body, parse feed.

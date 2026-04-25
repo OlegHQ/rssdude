@@ -111,9 +111,7 @@ pub(super) fn draw_items(
             let is_unread = !is_read;
             let is_vis_selected = visual_mode && selected_items.contains(&entry.item.id);
 
-            let gutter = if is_cursor {
-                "\u{2503} "
-            } else if is_vis_selected {
+            let gutter = if is_cursor || is_vis_selected {
                 "\u{2503} "
             } else if is_hovered {
                 "\u{2502} "
@@ -209,7 +207,7 @@ pub(super) fn draw_preview(
         let url = entry.item.link.clone().unwrap_or_default();
         let body = helpers::preview_body(&entry.item, w);
         let raw_content = entry.item.content.as_deref().or(entry.item.summary.as_deref()).unwrap_or("");
-        let wide_text = helpers::strip_html(raw_content, 100_000);
+        let wide_text = crate::shared::output::strip_html(raw_content, 100_000);
         let mut known_urls = helpers::extract_urls(&wide_text);
         if url.starts_with("http") { known_urls.push(url.clone()); }
 
@@ -308,18 +306,17 @@ fn stylize_body(
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut last_end = 0;
 
-        for (start, _) in raw_line.match_indices("http") {
-            let rest = &raw_line[start..];
-            let url_len = rest.find(|c: char| c.is_whitespace() || c == '>' || c == '"' || c == '\'' || c == ')' || c == ']')
-                .unwrap_or(rest.len());
-            let fragment = &raw_line[start..start + url_len];
-            if !fragment.starts_with("http://") && !fragment.starts_with("https://") { continue; }
+        for link in linkify::LinkFinder::new().links(raw_line) {
+            if !matches!(link.kind(), linkify::LinkKind::Url) { continue; }
+            let start = link.start();
+            let end = link.end();
+            let fragment = link.as_str();
             let full_url = known_urls.iter().find(|k| k.starts_with(fragment)).cloned()
                 .unwrap_or_else(|| fragment.to_string());
             if start > last_end { spans.push(Span::raw(raw_line[last_end..start].to_string())); }
             spans.push(Span::styled(fragment.to_string(), url_style));
-            links.push(PreviewLink { line: li, col_start: start, col_end: start + url_len, url: full_url.clone() });
-            last_end = start + url_len;
+            links.push(PreviewLink { line: li, col_start: start, col_end: end, url: full_url.clone() });
+            last_end = end;
             if fragment.len() < full_url.len() { continuation = Some((full_url, fragment.len())); }
         }
 
@@ -333,7 +330,7 @@ fn stylize_body(
 }
 
 pub(super) fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
-    let area = centered_rect(70, 28, frame.area());
+    let area = centered_rect(70, 32, frame.area());
     frame.render_widget(Clear, area);
     let bold = Style::default().add_modifier(Modifier::BOLD).fg(theme.fg);
     let normal = Style::default().fg(theme.fg);
@@ -360,6 +357,10 @@ pub(super) fn draw_help_overlay(frame: &mut Frame, theme: &Theme) {
         Line::from(Span::styled("  /      search             u   unread only", dim)),
         Line::from(Span::styled("  L      read later         t   filter tag", dim)),
         Line::from(Span::styled("  d      filter time        v   visual mode", dim)),
+        Line::from(""),
+        Line::from(Span::styled("Layout", bold)),
+        Line::from(Span::styled("  1   toggle sidebar        3   toggle preview", dim)),
+        Line::from(Span::styled("  [ / ]  resize sidebar     { / }  resize preview", dim)),
         Line::from(""),
         Line::from(Span::styled("Views", bold)),
         Line::from(Span::styled("  D   digest    T   trending    ?   this help", dim)),

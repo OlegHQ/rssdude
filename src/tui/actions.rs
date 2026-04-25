@@ -33,8 +33,9 @@ impl App {
             self.set_flash("Select an item first.".to_string(), true);
             return;
         };
+        let was_read = item.mark.as_ref().is_some_and(|m| m.read);
         let db = Arc::clone(&self.db);
-        self.spawn_action(true, data::toggle_mark_action(db, item.item.id, data::ToggleField::Read));
+        self.spawn_action(true, data::toggle_mark_action(db, item.item.id, Some(!was_read), None));
     }
 
     pub(super) fn toggle_current_star(&mut self) {
@@ -42,8 +43,9 @@ impl App {
             self.set_flash("Select an item first.".to_string(), true);
             return;
         };
+        let was_star = item.mark.as_ref().is_some_and(|m| m.starred);
         let db = Arc::clone(&self.db);
-        self.spawn_action(true, data::toggle_mark_action(db, item.item.id, data::ToggleField::Star));
+        self.spawn_action(true, data::toggle_mark_action(db, item.item.id, None, Some(!was_star)));
     }
 
     pub(super) fn open_current_link(&mut self) {
@@ -59,7 +61,7 @@ impl App {
             Ok(_) => {
                 self.set_flash(format!("Opened {url}"), false);
                 let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::toggle_mark_action(db, item.item.id, data::ToggleField::Read));
+                self.spawn_action(true, data::toggle_mark_action(db, item.item.id, Some(true), None));
             }
             Err(err) => self.set_flash(format!("Failed to open link: {err}"), true),
         }
@@ -89,7 +91,7 @@ impl App {
         let count = ids.len();
         self.spawn_action(true, async move {
             for id in ids {
-                let _ = data::toggle_mark_action(Arc::clone(&db), id, data::ToggleField::Read).await;
+                let _ = data::toggle_mark_action(Arc::clone(&db), id, Some(true), None).await;
             }
             Ok(format!("Marked {count} items as read."))
         });
@@ -102,7 +104,8 @@ impl App {
         let count = ids.len();
         self.spawn_action(true, async move {
             for id in ids {
-                let _ = data::toggle_mark_action(Arc::clone(&db), id, data::ToggleField::Star).await;
+                // Read the current state inline since we're looping
+                let _ = crate::commands::curate::mark_core(Arc::clone(&db), id, None, Some(true), None).await;
             }
             Ok(format!("Starred {count} items."))
         });

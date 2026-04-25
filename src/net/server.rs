@@ -130,7 +130,7 @@ struct SyncReq { feed: Option<String> }
 
 async fn sync_feeds(State(s): State<AppState>, headers: axum::http::HeaderMap, Json(req): Json<SyncReq>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let result = commands::sync::sync_core(s.db, req.feed).await?;
+    let result = commands::sync::sync_core(s.db, req.feed, None).await?;
     Ok(Json(serde_json::json!(result)))
 }
 
@@ -183,7 +183,7 @@ struct MarkReq { #[serde(default)] read: bool, #[serde(default)] star: bool, not
 
 async fn mark_item(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(req): Json<MarkReq>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let (_, mark) = commands::curate::mark_core(s.db, id, req.read, req.star, req.note).await?;
+    let (_, mark) = commands::curate::mark_core(s.db, id, req.read.then_some(true), req.star.then_some(true), req.note).await?;
     Ok(Json(serde_json::json!(mark)))
 }
 
@@ -193,9 +193,7 @@ struct OptionalLimitQuery { limit: Option<usize> }
 async fn list_starred(State(s): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<OptionalLimitQuery>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
     let results = commands::curate::starred_core(s.db, q.limit).await?;
-    let json_items: Vec<ItemJson> = results.iter()
-        .map(|(item, feed, mark)| ItemJson::from_parts(item, feed.as_ref(), Some(mark))).collect();
-    Ok(Json(serde_json::json!(json_items)))
+    Ok(Json(serde_json::json!(results)))
 }
 
 async fn export_item(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> ApiResult<serde_json::Value> {
@@ -244,9 +242,7 @@ fn default_stats_since() -> String { "30d".to_string() }
 
 async fn get_stats(State(s): State<AppState>, headers: axum::http::HeaderMap, Query(q): Query<StatsQueryParams>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let dur = crate::shared::output::parse_duration(&q.since)?;
-    let days = dur.num_days().max(1) as u32;
-    let result = commands::stats::stats_core(s.db, days, q.dead).await?;
+    let result = commands::stats::stats_core(s.db, &q.since, q.dead).await?;
     Ok(Json(serde_json::json!(result)))
 }
 

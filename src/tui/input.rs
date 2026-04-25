@@ -93,17 +93,35 @@ impl App {
     pub(super) fn cycle_focus_forward(&mut self) {
         self.focus = match self.focus {
             Focus::Sidebar => Focus::Items,
-            Focus::Items => Focus::Preview,
-            Focus::Preview => Focus::Sidebar,
+            Focus::Items => if self.show_preview { Focus::Preview } else if self.show_sidebar { Focus::Sidebar } else { Focus::Items },
+            Focus::Preview => if self.show_sidebar { Focus::Sidebar } else { Focus::Items },
         };
     }
 
     pub(super) fn cycle_focus_back(&mut self) {
         self.focus = match self.focus {
-            Focus::Sidebar => Focus::Preview,
-            Focus::Items => Focus::Sidebar,
+            Focus::Sidebar => if self.show_preview { Focus::Preview } else { Focus::Items },
+            Focus::Items => if self.show_sidebar { Focus::Sidebar } else if self.show_preview { Focus::Preview } else { Focus::Items },
             Focus::Preview => Focus::Items,
         };
+    }
+
+    /// Handle scroll keys for a scrollable overlay. Returns true if the key was consumed.
+    fn handle_scrollable_overlay_key(key: &KeyEvent, scroll: &mut u16, half: u16) -> bool {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+            KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+            KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                *scroll = scroll.saturating_add(half);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                *scroll = scroll.saturating_sub(half);
+            }
+            _ => return false,
+        }
+        true
     }
 
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
@@ -119,23 +137,10 @@ impl App {
         // Handle digest overlay
         if self.digest_content.is_some() {
             let half = self.half_page() as u16;
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('D') => self.digest_content = None,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.digest_scroll = self.digest_scroll.saturating_add(1);
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.digest_scroll = self.digest_scroll.saturating_sub(1);
-                }
-                KeyCode::PageDown => self.digest_scroll = self.digest_scroll.saturating_add(10),
-                KeyCode::PageUp => self.digest_scroll = self.digest_scroll.saturating_sub(10),
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.digest_scroll = self.digest_scroll.saturating_add(half);
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.digest_scroll = self.digest_scroll.saturating_sub(half);
-                }
-                _ => {}
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('D')) {
+                self.digest_content = None;
+            } else {
+                Self::handle_scrollable_overlay_key(&key, &mut self.digest_scroll, half);
             }
             return;
         }
@@ -143,34 +148,22 @@ impl App {
         // Handle trending overlay
         if self.trending_content.is_some() {
             let half = self.half_page() as u16;
-            match key.code {
-                KeyCode::Esc | KeyCode::Char('T') => self.trending_content = None,
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.trending_scroll = self.trending_scroll.saturating_add(1);
-                }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    self.trending_scroll = self.trending_scroll.saturating_sub(1);
-                }
-                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.trending_scroll = self.trending_scroll.saturating_add(half);
-                }
-                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.trending_scroll = self.trending_scroll.saturating_sub(half);
-                }
-                KeyCode::Enter => {
-                    if let Some(ref lines) = self.trending_content {
-                        let idx = self.trending_scroll as usize + 2;
-                        if let Some(line) = lines.get(idx) {
-                            if let Some(topic) = line.split_whitespace().next() {
-                                self.search_query = topic.to_string();
-                                self.item_index = 0;
-                                self.preview_scroll = 0;
-                            }
+            if matches!(key.code, KeyCode::Esc | KeyCode::Char('T')) {
+                self.trending_content = None;
+            } else if key.code == KeyCode::Enter {
+                if let Some(ref lines) = self.trending_content {
+                    let idx = self.trending_scroll as usize + 2;
+                    if let Some(line) = lines.get(idx) {
+                        if let Some(topic) = line.split_whitespace().next() {
+                            self.search_query = topic.to_string();
+                            self.item_index = 0;
+                            self.preview_scroll = 0;
                         }
                     }
-                    self.trending_content = None;
                 }
-                _ => {}
+                self.trending_content = None;
+            } else {
+                Self::handle_scrollable_overlay_key(&key, &mut self.trending_scroll, half);
             }
             return;
         }
@@ -184,34 +177,50 @@ impl App {
             return;
         }
 
+        self.handle_main_keys(key);
+    }
+
+    fn handle_main_keys(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Esc => {
-                if self.visual_mode {
-                    self.visual_mode = false;
-                    self.selected_items.clear();
-                }
+            KeyCode::Esc if self.visual_mode => {
+                self.visual_mode = false;
+                self.selected_items.clear();
             }
             KeyCode::Char('q') => self.should_quit = true,
+            // Panel collapse: 1=sidebar, 3=preview
+            KeyCode::Char('1') => {
+                self.show_sidebar = !self.show_sidebar;
+                if !self.show_sidebar && self.focus == Focus::Sidebar { self.focus = Focus::Items; }
+            }
+            KeyCode::Char('3') => {
+                self.show_preview = !self.show_preview;
+                if !self.show_preview && self.focus == Focus::Preview { self.focus = Focus::Items; }
+            }
+            // Panel resize: [/] shrink/grow sidebar, {/} shrink/grow preview
+            KeyCode::Char('[') if self.sidebar_pct > 10 => self.sidebar_pct -= 5,
+            KeyCode::Char(']') if self.sidebar_pct < 50 => self.sidebar_pct += 5,
+            KeyCode::Char('{') if self.preview_pct > 15 => self.preview_pct -= 5,
+            KeyCode::Char('}') if self.preview_pct < 70 => self.preview_pct += 5,
             KeyCode::Tab => self.cycle_focus_forward(),
             KeyCode::BackTab => self.cycle_focus_back(),
             KeyCode::Left | KeyCode::Char('h') => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Sidebar,
-                    Focus::Items => Focus::Sidebar,
+                    Focus::Items => if self.show_sidebar { Focus::Sidebar } else { Focus::Items },
                     Focus::Preview => Focus::Items,
                 };
             }
             KeyCode::Right => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Items,
-                    Focus::Items => Focus::Preview,
+                    Focus::Items => if self.show_preview { Focus::Preview } else { Focus::Items },
                     Focus::Preview => Focus::Preview,
                 };
             }
             KeyCode::Char('l') => {
                 self.focus = match self.focus {
                     Focus::Sidebar => Focus::Items,
-                    Focus::Items => Focus::Preview,
+                    Focus::Items => if self.show_preview { Focus::Preview } else { Focus::Items },
                     Focus::Preview => Focus::Preview,
                 };
             }
@@ -274,8 +283,9 @@ impl App {
                         }
                     }
                 } else if let Some(item) = self.current_item() {
+                    let was_read = item.mark.as_ref().is_some_and(|m| m.read);
                     let db = Arc::clone(&self.db);
-                    self.spawn_action(true, data::toggle_mark_action(db, item.item.id, data::ToggleField::Read));
+                    self.spawn_action(true, data::toggle_mark_action(db, item.item.id, Some(!was_read), None));
                     self.advance_to_next_unread();
                 }
             }
@@ -352,13 +362,50 @@ impl App {
 
         let x = mouse.column;
         let y = mouse.row;
+        let body_width = layout.sidebar.width + layout.items.width + layout.preview.width;
+        let body_x = layout.items.x.min(layout.sidebar.x.min(layout.preview.x));
+
+        // Drag release
+        if matches!(mouse.kind, MouseEventKind::Up(_)) {
+            self.dragging = None;
+            return;
+        }
+
+        // Active drag — update percentages
+        if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+            if let Some(target) = self.dragging {
+                let rel = x.saturating_sub(body_x);
+                let pct = ((rel as u32 * 100) / body_width.max(1) as u32) as u16;
+                match target {
+                    DragTarget::SidebarBorder => self.sidebar_pct = pct.clamp(10, 50),
+                    DragTarget::PreviewBorder => {
+                        self.preview_pct = (100u16.saturating_sub(pct)).clamp(15, 70);
+                    }
+                }
+                return;
+            }
+        }
+
+        // Check if clicking on a panel border to start dragging
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let sidebar_edge = layout.sidebar.x + layout.sidebar.width;
+            let preview_edge = layout.preview.x;
+            if self.show_sidebar && (x == sidebar_edge || x + 1 == sidebar_edge) {
+                self.dragging = Some(DragTarget::SidebarBorder);
+                return;
+            }
+            if self.show_preview && (x == preview_edge || x == preview_edge.saturating_sub(1)) {
+                self.dragging = Some(DragTarget::PreviewBorder);
+                return;
+            }
+        }
 
         // Hover tracking — update on every mouse move, no focus change
         if matches!(mouse.kind, MouseEventKind::Moved) {
             self.hover_sidebar = None;
             self.hover_item = None;
             self.hover_link = None;
-            if helpers::rect_contains(layout.sidebar, x, y) {
+            if self.show_sidebar && helpers::rect_contains(layout.sidebar, x, y) {
                 if let Some(line) = helpers::relative_line(layout.sidebar_inner, y) {
                     let idx = self.sidebar_offset + line as usize;
                     if idx < self.sidebar_entries().len() { self.hover_sidebar = Some(idx); }
@@ -369,75 +416,84 @@ impl App {
                     let items = self.visible_items();
                     if idx < items.len() { self.hover_item = Some(idx); }
                 }
-            } else if helpers::rect_contains(layout.preview, x, y) {
+            } else if self.show_preview && helpers::rect_contains(layout.preview, x, y) {
                 self.hover_link = self.url_at_position(layout, x, y);
             }
             return;
         }
 
         // Click/scroll — only these change focus
-        if helpers::rect_contains(layout.sidebar, x, y) {
-            self.focus = Focus::Sidebar;
-            self.last_item_click = None;
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(line) = helpers::relative_line(layout.sidebar_inner, y) {
-                        let entries = self.sidebar_entries();
-                        let index = self.sidebar_offset + line as usize;
-                        if index < entries.len() {
-                            self.sidebar_index = index;
-                            self.item_index = 0;
-                            self.preview_scroll = 0;
-                        }
-                    }
-                }
-                MouseEventKind::ScrollUp => self.move_selection_up(3),
-                MouseEventKind::ScrollDown => self.move_selection_down(3),
-                _ => {}
-            }
+        if self.show_sidebar && helpers::rect_contains(layout.sidebar, x, y) {
+            self.handle_sidebar_mouse(layout, &mouse, y);
         } else if helpers::rect_contains(layout.items, x, y) {
-            self.focus = Focus::Items;
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(line) = helpers::relative_line(layout.items_inner, y) {
-                        let items = self.visible_items();
-                        let index = self.items_offset + (line as usize / 2);
-                        if index < items.len() {
-                            self.item_index = index;
-                            self.preview_scroll = 0;
-                            let now = Instant::now();
-                            if helpers::is_double_click(self.last_item_click.as_ref(), index, now) {
-                                self.last_item_click = None;
-                                self.open_current_link();
-                            } else {
-                                self.last_item_click = Some(LastItemClick {
-                                    item_index: index,
-                                    at: now,
-                                });
-                            }
+            self.handle_items_mouse(layout, &mouse, y);
+        } else if self.show_preview && helpers::rect_contains(layout.preview, x, y) {
+            self.handle_preview_mouse(layout, &mouse, x, y);
+        }
+    }
+
+    fn handle_sidebar_mouse(&mut self, layout: UiLayout, mouse: &MouseEvent, y: u16) {
+        self.focus = Focus::Sidebar;
+        self.last_item_click = None;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(line) = helpers::relative_line(layout.sidebar_inner, y) {
+                    let entries = self.sidebar_entries();
+                    let index = self.sidebar_offset + line as usize;
+                    if index < entries.len() {
+                        self.sidebar_index = index;
+                        self.item_index = 0;
+                        self.preview_scroll = 0;
+                    }
+                }
+            }
+            MouseEventKind::ScrollUp => self.move_selection_up(3),
+            MouseEventKind::ScrollDown => self.move_selection_down(3),
+            _ => {}
+        }
+    }
+
+    fn handle_items_mouse(&mut self, layout: UiLayout, mouse: &MouseEvent, y: u16) {
+        self.focus = Focus::Items;
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(line) = helpers::relative_line(layout.items_inner, y) {
+                    let items = self.visible_items();
+                    let index = self.items_offset + (line as usize / 2);
+                    if index < items.len() {
+                        self.item_index = index;
+                        self.preview_scroll = 0;
+                        let now = Instant::now();
+                        if helpers::is_double_click(self.last_item_click.as_ref(), index, now) {
+                            self.last_item_click = None;
+                            self.open_current_link();
+                        } else {
+                            self.last_item_click = Some(LastItemClick { item_index: index, at: now });
                         }
                     }
                 }
-                MouseEventKind::ScrollUp => self.move_selection_up(3),
-                MouseEventKind::ScrollDown => self.move_selection_down(3),
-                _ => {}
             }
-        } else if helpers::rect_contains(layout.preview, x, y) {
-            self.focus = Focus::Preview;
-            self.last_item_click = None;
-            match mouse.kind {
-                MouseEventKind::ScrollUp => self.preview_scroll = self.preview_scroll.saturating_sub(3),
-                MouseEventKind::ScrollDown => self.preview_scroll = self.preview_scroll.saturating_add(3),
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(url) = self.url_at_position(layout, x, y) {
-                        match Command::new("open").arg(&url).spawn() {
-                            Ok(_) => self.set_flash(format!("Opened {url}"), false),
-                            Err(e) => self.set_flash(format!("Failed: {e}"), true),
-                        }
+            MouseEventKind::ScrollUp => self.move_selection_up(3),
+            MouseEventKind::ScrollDown => self.move_selection_down(3),
+            _ => {}
+        }
+    }
+
+    fn handle_preview_mouse(&mut self, layout: UiLayout, mouse: &MouseEvent, x: u16, y: u16) {
+        self.focus = Focus::Preview;
+        self.last_item_click = None;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => self.preview_scroll = self.preview_scroll.saturating_sub(3),
+            MouseEventKind::ScrollDown => self.preview_scroll = self.preview_scroll.saturating_add(3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(url) = self.url_at_position(layout, x, y) {
+                    match Command::new("open").arg(&url).spawn() {
+                        Ok(_) => self.set_flash(format!("Opened {url}"), false),
+                        Err(e) => self.set_flash(format!("Failed: {e}"), true),
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 

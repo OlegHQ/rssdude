@@ -33,7 +33,7 @@ pub(super) async fn load_browser_data(db: Arc<Database<'static>>) -> Result<Brow
         let watches: Vec<SavedSearch> = r.scan().primary()?.all()?.filter_map(|s| s.ok()).collect();
 
         feeds.sort_by_key(helpers::feed_sort_key);
-        folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        folders.sort_by_cached_key(|f| f.name.to_lowercase());
         items.sort_by(|a, b| helpers::item_time_key(b).cmp(helpers::item_time_key(a)));
 
         let feed_lookup: HashMap<String, Feed> = feeds
@@ -90,115 +90,29 @@ async fn sync_feeds_action(
     feed_id: Option<String>,
     tx: Sender<AppMessage>,
 ) -> Result<()> {
-    let db_for_list = Arc::clone(&db);
-    let feeds: Vec<Feed> = spawn_blocking(move || {
-        let r = db_for_list.r_transaction()?;
-        let all: Vec<Feed> = r
-            .scan()
-            .primary()?
-            .all()?
-            .filter_map(|row| row.ok())
-            .collect();
-        Ok::<_, anyhow::Error>(all)
-    })
-    .await??;
-
-    let feeds: Vec<Feed> = if let Some(id) = feed_id {
-        let selected: Vec<Feed> = feeds.into_iter().filter(|feed| feed.id == id).collect();
-        if selected.is_empty() {
-            bail!("Feed not found.");
-        }
-        selected
-    } else {
-        feeds
-    };
-
-    let _ = tx.send(AppMessage::SyncStarted {
-        total: feeds.len(),
-        scope: if feeds.len() == 1 {
-            "feed".to_string()
-        } else {
-            "feeds".to_string()
-        },
-    });
-
-    let mut total_new = 0usize;
-    let mut errors = Vec::new();
-
-    for (index, feed_record) in feeds.iter().enumerate() {
-        let title = feed_record
-            .title
-            .clone()
-            .unwrap_or_else(|| feed_record.url.clone());
-
-        let result = match feed::fetch_feed_conditional(
-            &feed_record.url,
-            feed_record.etag.as_deref(),
-            feed_record.last_modified.as_deref(),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(err) => {
-                errors.push(format!("{title}: {err:#}"));
-                let _ = tx.send(AppMessage::SyncProgress {
-                    completed: index + 1,
-                    total: feeds.len(),
-                    title,
-                    total_new,
+    let tx2 = tx.clone();
+    let result = crate::commands::sync::sync_core(
+        db,
+        feed_id,
+        Some(Box::new(move |completed, total, _feed_result, _total_new| {
+            if completed == 1 {
+                let _ = tx2.send(AppMessage::SyncStarted {
+                    total,
+                    scope: if total == 1 { "feed".to_string() } else { "feeds".to_string() },
                 });
-                continue;
             }
-        };
-
-        let Some(fetch_result) = result else {
-            let _ = tx.send(AppMessage::SyncProgress {
-                completed: index + 1,
-                total: feeds.len(),
-                title,
-                total_new,
+            let _ = tx2.send(AppMessage::SyncProgress {
+                completed,
+                total,
             });
-            continue;
-        };
+        })),
+    ).await?;
 
-        let now = Utc::now().to_rfc3339();
-        let items = feed::entries_to_items(&fetch_result.feed.entries, &feed_record.id, &now);
-        let db_for_write = Arc::clone(&db);
-        let feed_id = feed_record.id.clone();
-        let etag = fetch_result.etag.clone();
-        let last_modified = fetch_result.last_modified.clone();
-        let new_count = spawn_blocking(move || {
-            let rw = db_for_write.rw_transaction()?;
-            let mut inserted = 0usize;
-            for item in items {
-                let existing: Option<Item> = rw.get().secondary(ItemKey::guid, item.guid.clone()).ok().flatten();
-                if existing.is_none() {
-                    rw.insert(item)?;
-                    inserted += 1;
-                }
-            }
-            if let Some(mut updated_feed) = rw.get().primary::<Feed>(feed_id)? {
-                let old = updated_feed.clone();
-                updated_feed.last_synced = Some(now);
-                updated_feed.etag = etag;
-                updated_feed.last_modified = last_modified;
-                rw.update(old, updated_feed)?;
-            }
-            rw.commit()?;
-            Ok::<_, anyhow::Error>(inserted)
-        })
-        .await??;
-
-        total_new += new_count;
-        let _ = tx.send(AppMessage::SyncProgress {
-            completed: index + 1,
-            total: feeds.len(),
-            title,
-            total_new,
-        });
-    }
-
-    let _ = tx.send(AppMessage::SyncFinished { total_new, errors });
+    let errors: Vec<String> = result.results.iter()
+        .filter(|r| r.status == "error")
+        .map(|r| format!("{}: {}", r.title, r.error.as_deref().unwrap_or("?")))
+        .collect();
+    let _ = tx.send(AppMessage::SyncFinished { total_new: result.new_items, errors });
     Ok(())
 }
 
@@ -236,28 +150,8 @@ pub(super) async fn move_folder_action(
     folder_id: String,
     parent_id: Option<String>,
 ) -> Result<String> {
-    if let Some(pid) = parent_id {
-        let folder = crate::commands::folder::move_folder_core(db, folder_id, Some(pid)).await?;
-        Ok(format!("Moved folder \"{}\".", folder.name))
-    } else {
-        // Move to root (no parent) — not supported by move_folder_core which requires a parent
-        let db_for_write = Arc::clone(&db);
-        let name = spawn_blocking(move || {
-            let rw = db_for_write.rw_transaction()?;
-            let folder: Folder = rw
-                .get()
-                .primary(folder_id.clone())?
-                .ok_or_else(|| anyhow::anyhow!("Folder not found."))?;
-            let name = folder.name.clone();
-            let mut updated = folder.clone();
-            updated.parent_id = None;
-            rw.update(folder, updated)?;
-            rw.commit()?;
-            Ok::<_, anyhow::Error>(name)
-        })
-        .await??;
-        Ok(format!("Moved folder \"{name}\"."))
-    }
+    let folder = crate::commands::folder::move_folder_core(db, folder_id, parent_id).await?;
+    Ok(format!("Moved folder \"{}\".", folder.name))
 }
 
 pub(super) async fn delete_folder_action(
@@ -279,25 +173,8 @@ pub(super) async fn move_feed_action(
     feed_id: String,
     folder_id: Option<String>,
 ) -> Result<String> {
-    if let Some(fid) = folder_id {
-        let (feed_title, _) = crate::commands::feed_mgmt::move_to_folder_core(db, feed_id, Some(fid)).await?;
-        Ok(format!("Moved feed \"{feed_title}\"."))
-    } else {
-        // Move to root (uncategorized)
-        let db_for_write = Arc::clone(&db);
-        let name = spawn_blocking(move || {
-            let rw = db_for_write.rw_transaction()?;
-            let feed: Feed = rw.get().primary(feed_id.clone())?
-                .ok_or_else(|| anyhow::anyhow!("Feed not found."))?;
-            let name = helpers::feed_label(&feed);
-            let mut updated = feed.clone();
-            updated.folder_id = None;
-            rw.update(feed, updated)?;
-            rw.commit()?;
-            Ok::<_, anyhow::Error>(name)
-        }).await??;
-        Ok(format!("Moved feed \"{name}\"."))
-    }
+    let (feed_title, _) = crate::commands::feed_mgmt::move_to_folder_core(db, feed_id, folder_id).await?;
+    Ok(format!("Moved feed \"{feed_title}\"."))
 }
 
 pub(super) async fn remove_feed_action(db: Arc<Database<'static>>, feed_id: String) -> Result<String> {
@@ -305,71 +182,22 @@ pub(super) async fn remove_feed_action(db: Arc<Database<'static>>, feed_id: Stri
     Ok(format!("Removed feed \"{title}\"."))
 }
 
-pub(super) enum ToggleField { Read, Star }
-
-pub(super) async fn toggle_mark_action(db: Arc<Database<'static>>, item_id: String, field: ToggleField) -> Result<String> {
-    spawn_blocking(move || {
-        let rw = db.rw_transaction()?;
-        let item: Item = rw.get().primary(item_id.clone())?
-            .ok_or_else(|| anyhow::anyhow!("Item not found."))?;
-        let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
-
-        let old_read = existing.as_ref().is_some_and(|m| m.read);
-        let old_star = existing.as_ref().is_some_and(|m| m.starred);
-        let (new_read, new_star, label) = match field {
-            ToggleField::Read => (!old_read, old_star, if !old_read { "Marked read:" } else { "Marked unread:" }),
-            ToggleField::Star => (old_read, !old_star, if !old_star { "Starred:" } else { "Unstarred:" }),
-        };
-
-        let now = Utc::now().to_rfc3339();
-        let mark = Mark {
-            item_id, read: new_read, starred: new_star,
-            note: existing.as_ref().and_then(|m| m.note.clone()),
-            read_at: if new_read && !old_read { Some(now.clone()) } else { existing.as_ref().and_then(|m| m.read_at.clone()) },
-            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
-            read_later: existing.as_ref().is_some_and(|m| m.read_later),
-            marked_at: now,
-        };
-        let _: Option<Mark> = rw.upsert(mark)?;
-        rw.commit()?;
-        Ok(format!("{label} {}", item.title.unwrap_or_else(|| "(untitled)".to_string())))
-    }).await?
+/// Toggle read or starred. `new_read` / `new_star` are the desired new values (caller computes the toggle).
+pub(super) async fn toggle_mark_action(db: Arc<Database<'static>>, item_id: String, new_read: Option<bool>, new_star: Option<bool>) -> Result<String> {
+    let (item, _) = crate::commands::curate::mark_core(db, item_id, new_read, new_star, None).await?;
+    let label = match (new_read, new_star) {
+        (Some(true), _) => "Marked read:",
+        (Some(false), _) => "Marked unread:",
+        (_, Some(true)) => "Starred:",
+        (_, Some(false)) => "Unstarred:",
+        _ => "Updated:",
+    };
+    Ok(format!("{label} {}", item.title.unwrap_or_else(|| "(untitled)".to_string())))
 }
 
-pub(super) async fn save_note_action(
-    db: Arc<Database<'static>>,
-    item_id: String,
-    note: String,
-) -> Result<String> {
-    let db_for_write = Arc::clone(&db);
-    let message = spawn_blocking(move || {
-        let rw = db_for_write.rw_transaction()?;
-        let item: Item = rw
-            .get()
-            .primary(item_id.clone())?
-            .ok_or_else(|| anyhow::anyhow!("Item not found."))?;
-        let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
-
-        let mark = Mark {
-            item_id,
-            read: existing.as_ref().is_some_and(|mark| mark.read),
-            starred: existing.as_ref().is_some_and(|mark| mark.starred),
-            note: if note.is_empty() { None } else { Some(note) },
-            read_at: existing.as_ref().and_then(|m| m.read_at.clone()),
-            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
-            read_later: existing.as_ref().is_some_and(|m| m.read_later),
-            marked_at: Utc::now().to_rfc3339(),
-        };
-        let _: Option<Mark> = rw.upsert(mark)?;
-        rw.commit()?;
-        Ok::<_, anyhow::Error>(format!(
-            "Saved note for {}",
-            item.title.unwrap_or_else(|| "(untitled)".to_string())
-        ))
-    })
-    .await??;
-
-    Ok(message)
+pub(super) async fn save_note_action(db: Arc<Database<'static>>, item_id: String, note: String) -> Result<String> {
+    let (item, _) = crate::commands::curate::mark_core(db, item_id, None, None, Some(note)).await?;
+    Ok(format!("Saved note for {}", item.title.unwrap_or_else(|| "(untitled)".to_string())))
 }
 
 pub(super) async fn mark_all_read_action(
@@ -395,21 +223,13 @@ pub(super) async fn mark_all_read_action(
             _ => items.iter().map(|i| i.id.clone()).collect(),
         };
 
-        let now = Utc::now().to_rfc3339();
         let mut count = 0usize;
         for item_id in &target_ids {
             let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
             if existing.as_ref().is_some_and(|m| m.read) { continue; }
-            let mark = Mark {
-                item_id: item_id.clone(),
-                read: true,
-                starred: existing.as_ref().is_some_and(|m| m.starred),
-                note: existing.as_ref().and_then(|m| m.note.clone()),
-                read_at: Some(now.clone()),
-                opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
-                read_later: existing.as_ref().is_some_and(|m| m.read_later),
-                marked_at: now.clone(),
-            };
+            let mut mark = Mark::from_existing(item_id.clone(), existing.as_ref());
+            mark.read = true;
+            mark.read_at = Some(mark.marked_at.clone());
             let _: Option<Mark> = rw.upsert(mark)?;
             count += 1;
         }
@@ -424,15 +244,8 @@ pub(super) async fn toggle_read_later_action(db: Arc<Database<'static>>, item_id
         let item: Item = rw.get().primary(item_id.clone())?.ok_or_else(|| anyhow::anyhow!("Item not found."))?;
         let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
         let was_later = existing.as_ref().is_some_and(|m| m.read_later);
-        let now = Utc::now().to_rfc3339();
-        let mark = Mark {
-            item_id, read: existing.as_ref().is_some_and(|m| m.read),
-            starred: existing.as_ref().is_some_and(|m| m.starred),
-            note: existing.as_ref().and_then(|m| m.note.clone()),
-            read_at: existing.as_ref().and_then(|m| m.read_at.clone()),
-            opened_at: existing.as_ref().and_then(|m| m.opened_at.clone()),
-            read_later: !was_later, marked_at: now,
-        };
+        let mut mark = Mark::from_existing(item_id, existing.as_ref());
+        mark.read_later = !was_later;
         let _: Option<Mark> = rw.upsert(mark)?;
         rw.commit()?;
         let title = item.title.unwrap_or_else(|| "(untitled)".into());

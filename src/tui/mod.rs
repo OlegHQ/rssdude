@@ -14,8 +14,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use anyhow::{Context, Result};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -30,7 +29,7 @@ use ratatui::{DefaultTerminal, Frame};
 use tokio::task::spawn_blocking;
 
 use crate::shared::db::*;
-use crate::shared::feed;
+
 use crate::shared::output::time_ago;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -170,8 +169,6 @@ pub(super) enum AppMessage {
     SyncProgress {
         completed: usize,
         total: usize,
-        title: String,
-        total_new: usize,
     },
     SyncFinished {
         total_new: usize,
@@ -184,14 +181,11 @@ pub(super) enum AppMessage {
 pub(super) struct SyncState {
     pub(super) total: usize,
     pub(super) completed: usize,
-    pub(super) current: String,
-    pub(super) total_new: usize,
     pub(super) scope: String,
 }
 
 pub(super) struct FlashMessage {
     pub(super) text: String,
-    pub(super) is_error: bool,
     pub(super) at: Instant,
 }
 
@@ -257,6 +251,17 @@ pub(super) struct App {
     pub(super) hover_sidebar: Option<usize>,
     pub(super) hover_item: Option<usize>,
     pub(super) hover_link: Option<String>,
+    pub(super) show_sidebar: bool,
+    pub(super) show_preview: bool,
+    pub(super) sidebar_pct: u16,
+    pub(super) preview_pct: u16,
+    pub(super) dragging: Option<DragTarget>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum DragTarget {
+    SidebarBorder,
+    PreviewBorder,
 }
 
 impl App {
@@ -274,22 +279,31 @@ impl App {
         let body = areas[1];
         let status_area = areas[2];
 
+        let mut constraints: Vec<Constraint> = Vec::new();
+        if self.show_sidebar { constraints.push(Constraint::Percentage(self.sidebar_pct)); }
+        constraints.push(Constraint::Min(20)); // items always visible, takes remaining space
+        if self.show_preview { constraints.push(Constraint::Percentage(self.preview_pct)); }
+
         let panes = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(30),
-                Constraint::Percentage(45),
-            ])
+            .constraints(constraints)
             .split(body);
 
+        let (sidebar_area, items_area, preview_area) = match (self.show_sidebar, self.show_preview) {
+            (true, true)   => (Some(panes[0]), panes[1], Some(panes[2])),
+            (true, false)  => (Some(panes[0]), panes[1], None),
+            (false, true)  => (None, panes[0], Some(panes[1])),
+            (false, false) => (None, panes[0], None),
+        };
+
+        let zero = Rect::default();
         self.layout = Some(UiLayout {
-            sidebar: panes[0],
-            sidebar_inner: render::inner_rect(panes[0]),
-            items: panes[1],
-            items_inner: render::inner_rect(panes[1]),
-            preview: panes[2],
-            preview_inner: render::inner_rect(panes[2]),
+            sidebar: sidebar_area.unwrap_or(zero),
+            sidebar_inner: sidebar_area.map(render::inner_rect).unwrap_or(zero),
+            items: items_area,
+            items_inner: render::inner_rect(items_area),
+            preview: preview_area.unwrap_or(zero),
+            preview_inner: preview_area.map(render::inner_rect).unwrap_or(zero),
         });
 
         let sidebar_entries = self.sidebar_entries();
@@ -297,22 +311,28 @@ impl App {
         self.sidebar_index = helpers::clamp_index(self.sidebar_index, sidebar_entries.len());
         self.item_index = helpers::clamp_index(self.item_index, items.len());
 
-        self.sidebar_offset = render::draw_sidebar(
-            frame, panes[0], &sidebar_entries,
-            self.sidebar_index, self.sidebar_offset,
-            self.focus, &self.theme, &self.collapsed_folders,
-            self.hover_sidebar,
-        );
+        if let Some(area) = sidebar_area {
+            self.sidebar_offset = render::draw_sidebar(
+                frame, area, &sidebar_entries,
+                self.sidebar_index, self.sidebar_offset,
+                self.focus, &self.theme, &self.collapsed_folders,
+                self.hover_sidebar,
+            );
+        }
         self.items_offset = render::draw_items(
-            frame, panes[1], &items,
+            frame, items_area, &items,
             self.item_index, self.items_offset,
             self.focus, &self.theme, self.visual_mode, &self.selected_items,
             self.hover_item,
         );
-        self.preview_links = render::draw_preview(
-            frame, panes[2], self.current_item(),
-            self.preview_scroll, self.focus, &self.theme,
-        );
+        if let Some(area) = preview_area {
+            self.preview_links = render::draw_preview(
+                frame, area, self.current_item(),
+                self.preview_scroll, self.focus, &self.theme,
+            );
+        } else {
+            self.preview_links.clear();
+        }
 
         self.draw_status_bar(frame, status_area);
 
@@ -405,12 +425,6 @@ async fn run_app(mut terminal: DefaultTerminal, db: Arc<Database<'static>>) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn strip_html_removes_tags_and_decodes_basic_entities() {
-        let input = "<p>Hello <b>world</b> &amp; friends</p>";
-        assert_eq!(helpers::strip_html(input, 200), "Hello world & friends");
-    }
 
     #[test]
     fn double_click_requires_same_item_within_threshold() {

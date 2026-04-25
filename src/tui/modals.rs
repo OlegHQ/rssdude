@@ -96,55 +96,49 @@ impl App {
         }));
     }
 
+    fn make_confirm_modal(title: impl Into<String>, body: impl Into<String>, action: ConfirmAction) -> Modal {
+        Modal::Confirm(ConfirmModal { title: title.into(), body: body.into(), action })
+    }
+
     pub(super) fn open_delete_modal(&mut self, recursive: bool) {
         match self.selected_scope() {
             SidebarKind::Feed(feed_id) => {
-                let title = self
-                    .data
-                    .as_ref()
+                let title = self.data.as_ref()
                     .and_then(|data| data.feed_lookup.get(&feed_id))
                     .map(helpers::feed_label)
                     .unwrap_or_else(|| "feed".to_string());
-                self.modal = Some(Modal::Confirm(ConfirmModal {
-                    title: "Remove feed".to_string(),
-                    body: format!("Remove \"{title}\" and all of its cached items?"),
-                    action: ConfirmAction::DeleteFeed { feed_id },
-                }));
+                self.modal = Some(Self::make_confirm_modal(
+                    "Remove feed",
+                    format!("Remove \"{title}\" and all of its cached items?"),
+                    ConfirmAction::DeleteFeed { feed_id },
+                ));
             }
             SidebarKind::Folder(folder_id) => {
-                let name = self
-                    .data
-                    .as_ref()
+                let name = self.data.as_ref()
                     .and_then(|data| data.folders.iter().find(|folder| folder.id == folder_id))
                     .map(|folder| folder.name.clone())
                     .unwrap_or_else(|| "folder".to_string());
-                self.modal = Some(Modal::Confirm(ConfirmModal {
-                    title: if recursive {
-                        "Delete folder recursively".to_string()
-                    } else {
-                        "Delete folder".to_string()
-                    },
-                    body: if recursive {
-                        format!("Delete \"{name}\" and everything under it?")
-                    } else {
-                        format!("Delete \"{name}\" and reparent its children and feeds?")
-                    },
-                    action: ConfirmAction::DeleteFolder {
-                        folder_id,
-                        recursive,
-                    },
-                }));
+                let (modal_title, modal_body) = if recursive {
+                    ("Delete folder recursively", format!("Delete \"{name}\" and everything under it?"))
+                } else {
+                    ("Delete folder", format!("Delete \"{name}\" and reparent its children and feeds?"))
+                };
+                self.modal = Some(Self::make_confirm_modal(
+                    modal_title,
+                    modal_body,
+                    ConfirmAction::DeleteFolder { folder_id, recursive },
+                ));
             }
             SidebarKind::Board(board_id) => {
                 let name = self.data.as_ref()
                     .and_then(|d| d.boards.iter().find(|b| b.id == board_id))
                     .map(|b| b.name.clone())
                     .unwrap_or_else(|| "board".into());
-                self.modal = Some(Modal::Confirm(ConfirmModal {
-                    title: "Delete board".into(),
-                    body: format!("Delete board \"{name}\"?"),
-                    action: ConfirmAction::DeleteBoard { board_id },
-                }));
+                self.modal = Some(Self::make_confirm_modal(
+                    "Delete board",
+                    format!("Delete board \"{name}\"?"),
+                    ConfirmAction::DeleteBoard { board_id },
+                ));
             }
             _ => self.set_flash("Select a feed, folder, or board to delete.".to_string(), true),
         }
@@ -203,7 +197,7 @@ impl App {
     pub(super) fn open_tag_picker(&mut self) {
         let Some(data) = &self.data else { return; };
         let mut tags: Vec<String> = data.feeds.iter()
-            .flat_map(|f| f.tags.split(',').map(|t| t.trim().to_string()))
+            .flat_map(|f| f.tags.iter().cloned())
             .filter(|t| !t.is_empty())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
@@ -261,11 +255,11 @@ impl App {
                 return;
             }
         };
-        self.modal = Some(Modal::Confirm(ConfirmModal {
-            title: "Mark all read".into(),
-            body: format!("Mark all items in \"{label}\" as read?"),
-            action: ConfirmAction::MarkAllRead { scope: scope_str, scope_id },
-        }));
+        self.modal = Some(Self::make_confirm_modal(
+            "Mark all read",
+            format!("Mark all items in \"{label}\" as read?"),
+            ConfirmAction::MarkAllRead { scope: scope_str, scope_id },
+        ));
     }
 
     pub(super) fn open_export_picker(&mut self) {

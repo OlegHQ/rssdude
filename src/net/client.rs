@@ -285,7 +285,7 @@ impl Client {
             print_json(&resp);
         } else {
             let items = as_array(&resp);
-            print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &item_rows(items));
+            print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &item_value_rows(items));
         }
         Ok(())
     }
@@ -329,7 +329,7 @@ impl Client {
             print_json(&resp);
         } else {
             let items = as_array(&resp);
-            print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &item_rows(items));
+            print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &item_value_rows(items));
         }
         Ok(())
     }
@@ -681,23 +681,6 @@ impl Client {
     }
 }
 
-/// Build standard item table rows: ID, SOURCE, TITLE, PUBLISHED.
-fn item_rows(items: &[Value]) -> Vec<Vec<String>> {
-    items.iter().map(|i| vec![
-        i["id"].as_str().unwrap_or("").to_string(),
-        i["source"].as_str().unwrap_or("-").to_string(),
-        i["title"].as_str().unwrap_or("-").to_string(),
-        i["published_at"].as_str().map(time_ago).unwrap_or_else(|| "-".into()),
-    ]).collect()
-}
-
-/// Simple percent-encoding for query parameters.
 fn urlencoding(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "+".to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
+    urlencoding::encode(s).into_owned()
 }

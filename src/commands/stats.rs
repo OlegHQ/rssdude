@@ -66,9 +66,11 @@ pub struct DeadFeed {
 
 pub async fn stats_core(
     db: Arc<Database<'static>>,
-    since_days: u32,
+    since: &str,
     dead_threshold: Option<f32>,
 ) -> Result<StatsResult> {
+    let dur = parse_duration(since)?;
+    let since_days = dur.num_days().max(1) as u32;
     spawn_blocking(move || {
         let r = db.r_transaction()?;
         let feeds: Vec<Feed> = r.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
@@ -78,7 +80,7 @@ pub async fn stats_core(
         drop(r);
 
         let now = chrono::Utc::now().naive_utc();
-        let cutoff = now - chrono::Duration::days(since_days as i64);
+        let cutoff = now - dur;
         let threshold = dead_threshold.unwrap_or(5.0);
 
         let feed_map: HashMap<&str, &Feed> = feeds.iter().map(|f| (f.id.as_str(), f)).collect();
@@ -174,7 +176,7 @@ fn build_feed_engagement(
         }
     }
     per_feed.sort_by(|a, b| b.engagement_pct.partial_cmp(&a.engagement_pct).unwrap_or(std::cmp::Ordering::Equal));
-    dead.sort_by(|a, b| b.skipped.cmp(&a.skipped));
+    dead.sort_by_key(|d| std::cmp::Reverse(d.skipped));
     (per_feed, dead)
 }
 
@@ -232,9 +234,7 @@ pub async fn stats(
     dead_threshold: Option<f32>,
 ) -> Result<()> {
     let since_str = since.unwrap_or_else(|| "30d".into());
-    let dur = parse_duration(&since_str)?;
-    let days = dur.num_days().max(1) as u32;
-    let result = stats_core(db, days, dead_threshold).await?;
+    let result = stats_core(db, &since_str, dead_threshold).await?;
 
     if json {
         print_json(&result);

@@ -40,6 +40,11 @@ impl App {
             hover_sidebar: None,
             hover_item: None,
             hover_link: None,
+            show_sidebar: true,
+            show_preview: true,
+            sidebar_pct: 25,
+            preview_pct: 45,
+            dragging: None,
         }
     }
 
@@ -131,22 +136,16 @@ impl App {
                     self.syncing = Some(SyncState {
                         total,
                         completed: 0,
-                        current: String::new(),
-                        total_new: 0,
                         scope,
                     });
                 }
                 AppMessage::SyncProgress {
                     completed,
                     total,
-                    title,
-                    total_new,
                 } => {
                     self.syncing = Some(SyncState {
                         total,
                         completed,
-                        current: title,
-                        total_new,
                         scope: self
                             .syncing
                             .as_ref()
@@ -179,10 +178,9 @@ impl App {
         }
     }
 
-    pub(super) fn set_flash(&mut self, text: String, is_error: bool) {
+    pub(super) fn set_flash(&mut self, text: String, _is_error: bool) {
         self.flash = Some(FlashMessage {
             text,
-            is_error,
             at: Instant::now(),
         });
     }
@@ -190,38 +188,14 @@ impl App {
     pub(super) fn sidebar_entries(&self) -> Vec<SidebarEntry> {
         let Some(data) = &self.data else {
             return vec![
-                SidebarEntry {
-                    kind: SidebarKind::All,
-                    label: "All Items".to_string(),
-                    unread: 0,
-                    depth: 0,
-                    has_error: false, is_last_child: false,
-                },
-                SidebarEntry {
-                    kind: SidebarKind::Starred,
-                    label: "Starred".to_string(),
-                    unread: 0,
-                    depth: 0,
-                    has_error: false, is_last_child: false,
-                },
+                simple_entry(SidebarKind::All, "All Items", 0),
+                simple_entry(SidebarKind::Starred, "Starred", 0),
             ];
         };
 
         let mut entries = vec![
-            SidebarEntry {
-                kind: SidebarKind::All,
-                label: "All Items".to_string(),
-                unread: data.total_unread,
-                depth: 0,
-                has_error: false, is_last_child: false,
-            },
-            SidebarEntry {
-                kind: SidebarKind::Starred,
-                label: "Starred".to_string(),
-                unread: data.total_starred,
-                depth: 0,
-                has_error: false, is_last_child: false,
-            },
+            simple_entry(SidebarKind::All, "All Items", data.total_unread),
+            simple_entry(SidebarKind::Starred, "Starred", data.total_starred),
         ];
 
         let mut feeds_by_folder: HashMap<Option<String>, Vec<&Feed>> = HashMap::new();
@@ -243,7 +217,7 @@ impl App {
                 .push(folder);
         }
         for folders in folders_by_parent.values_mut() {
-            folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            folders.sort_by_cached_key(|f| f.name.to_lowercase());
         }
 
         if let Some(root_folders) = folders_by_parent.get(&None) {
@@ -260,84 +234,8 @@ impl App {
             }
         }
 
-        if let Some(uncategorized) = feeds_by_folder.get(&None) {
-            if !uncategorized.is_empty() {
-                let unread: usize = uncategorized
-                    .iter()
-                    .map(|feed| {
-                        data.feed_stats
-                            .get(&feed.id)
-                            .map(|stats| stats.unread)
-                            .unwrap_or(0)
-                    })
-                    .sum();
-                entries.push(SidebarEntry {
-                    kind: SidebarKind::Uncategorized,
-                    label: "Uncategorized".to_string(),
-                    unread,
-                    depth: 0,
-                    has_error: false, is_last_child: false,
-                });
-                let unc_len = uncategorized.len();
-                for (i, feed) in uncategorized.iter().enumerate() {
-                    entries.push(SidebarEntry {
-                        kind: SidebarKind::Feed(feed.id.clone()),
-                        label: helpers::feed_label(feed),
-                        unread: data
-                            .feed_stats
-                            .get(&feed.id)
-                            .map(|stats| stats.unread)
-                            .unwrap_or(0),
-                        depth: 1,
-                        has_error: feed.error_count > 0,
-                        is_last_child: i == unc_len - 1,
-                    });
-                }
-            }
-        }
-
-        // Read Later
-        let read_later_count = data.marks.values().filter(|m| m.read_later).count();
-        entries.push(SidebarEntry {
-            kind: SidebarKind::ReadLater,
-            label: "Read Later".into(),
-            unread: read_later_count,
-            depth: 0,
-            has_error: false, is_last_child: false,
-        });
-
-        // Recently Read
-        entries.push(SidebarEntry {
-            kind: SidebarKind::RecentlyRead,
-            label: "Recently Read".into(),
-            unread: 0,
-            depth: 0,
-            has_error: false, is_last_child: false,
-        });
-
-        // Boards
-        for board in &data.boards {
-            let count = data.board_items.iter().filter(|bi| bi.board_id == board.id).count();
-            entries.push(SidebarEntry {
-                kind: SidebarKind::Board(board.id.clone()),
-                label: format!("[B] {}", board.name),
-                unread: count,
-                depth: 0,
-                has_error: false, is_last_child: false,
-            });
-        }
-
-        // Watches
-        for watch in &data.watches {
-            entries.push(SidebarEntry {
-                kind: SidebarKind::Watch(watch.id.clone()),
-                label: format!("[W] {}", watch.name),
-                unread: 0,
-                depth: 0,
-                has_error: false, is_last_child: false,
-            });
-        }
-
+        push_uncategorized_entries(&mut entries, feeds_by_folder.get(&None), &data.feed_stats);
+        push_static_entries(&mut entries, data);
         entries
     }
 
@@ -349,14 +247,15 @@ impl App {
     }
 
     pub(super) fn visible_items(&self) -> Vec<VisibleItem> {
-        let Some(data) = &self.data else {
-            return Vec::new();
-        };
-
+        let Some(data) = &self.data else { return Vec::new(); };
         let scope = self.selected_scope();
+        let mut result = self.apply_filters(data, &scope);
+        apply_sort_and_dedup(&mut result, &scope, &self.sort_order, self.dedup);
+        result
+    }
 
-        // Board/Watch scopes use a different base item set
-        let base_items: Vec<&Item> = match &scope {
+    fn apply_filters<'a>(&self, data: &'a BrowserData, scope: &SidebarKind) -> Vec<VisibleItem> {
+        let base_items: Vec<&'a Item> = match scope {
             SidebarKind::Board(board_id) => {
                 let item_ids: HashSet<&str> = data.board_items.iter()
                     .filter(|bi| bi.board_id == *board_id)
@@ -369,73 +268,35 @@ impl App {
                     .find(|w| w.id == *watch_id)
                     .map(|w| w.query.to_lowercase())
                     .unwrap_or_default();
-                data.items.iter()
-                    .filter(|item| helpers::item_matches_query(item, &query))
-                    .collect()
+                data.items.iter().filter(|item| helpers::item_matches_query(item, &query)).collect()
             }
             _ => data.items.iter().collect(),
         };
 
-        let descendant_ids = match &scope {
-            SidebarKind::Folder(folder_id) => {
-                Some(collect_descendant_ids(&data.folders, folder_id))
-            }
-            _ => None,
-        };
+        let descendant_ids = if let SidebarKind::Folder(folder_id) = scope {
+            Some(collect_descendant_ids(&data.folders, folder_id))
+        } else { None };
         let query = self.search_query.to_lowercase();
+        let since_cutoff = self.since_filter.as_ref()
+            .and_then(|s| crate::shared::output::since_cutoff(s).ok());
 
-        let since_cutoff = self.since_filter.as_ref().and_then(|s| {
-            crate::shared::output::parse_duration(s).ok().map(|dur| chrono::Utc::now().naive_utc() - dur)
-        });
-
-        let mut result: Vec<VisibleItem> = base_items
-            .into_iter()
-            .filter(|item| helpers::item_matches_scope(item, &scope, data, descendant_ids.as_ref()))
+        base_items.into_iter()
+            .filter(|item| helpers::item_matches_scope(item, scope, data, descendant_ids.as_ref()))
             .filter(|item| helpers::item_matches_query(item, &query))
-            .filter(|item| {
-                if !self.unread_only { return true; }
-                !data.marks.get(&item.id).is_some_and(|mark| mark.read)
-            })
-            .filter(|item| {
-                if let Some(ref tag) = self.tag_filter {
-                    data.feed_lookup.get(&item.feed_id).is_some_and(|feed| {
-                        feed.tags.split(',').any(|t| t.trim().eq_ignore_ascii_case(tag))
-                    })
-                } else { true }
-            })
-            .filter(|item| {
-                if let Some(ref cutoff) = since_cutoff {
-                    item.published_at.as_ref().and_then(|p| {
-                        chrono::DateTime::parse_from_rfc3339(p).ok().map(|d| d.naive_utc())
-                    }).is_some_and(|dt| dt >= *cutoff)
-                } else { true }
-            })
+            .filter(|item| !self.unread_only || !data.marks.get(&item.id).is_some_and(|m| m.read))
+            .filter(|item| self.tag_filter.as_ref()
+                .is_none_or(|tag| data.feed_lookup.get(&item.feed_id).is_some_and(|f| f.has_tag(tag))))
+            .filter(|item| since_cutoff.as_ref()
+                .is_none_or(|cutoff| item.published_at.as_ref()
+                    .and_then(|p| crate::shared::output::parse_datetime(p).ok())
+                    .is_some_and(|dt| dt >= *cutoff)))
             .filter(|item| !is_muted(item, data.feed_lookup.get(&item.feed_id), &data.mute_filters))
             .map(|item| VisibleItem {
                 item: item.clone(),
                 feed: data.feed_lookup.get(&item.feed_id).cloned(),
                 mark: data.marks.get(&item.id).cloned(),
             })
-            .collect();
-
-        // Sort: RecentlyRead sorts by read_at desc; otherwise by sort_order
-        if matches!(scope, SidebarKind::RecentlyRead) {
-            result.sort_by(|a, b| {
-                let a_at = a.mark.as_ref().and_then(|m| m.read_at.as_deref()).unwrap_or("");
-                let b_at = b.mark.as_ref().and_then(|m| m.read_at.as_deref()).unwrap_or("");
-                b_at.cmp(a_at)
-            });
-        } else if self.sort_order == "oldest" {
-            result.reverse();
-        }
-
-        // Dedup by guid
-        if self.dedup {
-            let mut seen = HashSet::new();
-            result.retain(|vi| seen.insert(vi.item.guid.clone()));
-        }
-
-        result
+            .collect()
     }
 
     pub(super) fn current_item(&self) -> Option<VisibleItem> {
@@ -476,5 +337,62 @@ impl App {
                 true,
             ),
         }
+    }
+}
+
+fn apply_sort_and_dedup(result: &mut Vec<VisibleItem>, scope: &SidebarKind, sort_order: &str, dedup: bool) {
+    if matches!(scope, SidebarKind::RecentlyRead) {
+        result.sort_by(|a, b| {
+            let a_at = a.mark.as_ref().and_then(|m| m.read_at.as_deref()).unwrap_or("");
+            let b_at = b.mark.as_ref().and_then(|m| m.read_at.as_deref()).unwrap_or("");
+            b_at.cmp(a_at)
+        });
+    } else if sort_order == "oldest" {
+        result.reverse();
+    }
+    if dedup {
+        let mut seen = HashSet::new();
+        result.retain(|vi| seen.insert(vi.item.guid.clone()));
+    }
+}
+
+fn simple_entry(kind: SidebarKind, label: impl Into<String>, unread: usize) -> SidebarEntry {
+    SidebarEntry { kind, label: label.into(), unread, depth: 0, has_error: false, is_last_child: false }
+}
+
+fn push_uncategorized_entries(
+    entries: &mut Vec<SidebarEntry>,
+    uncategorized: Option<&Vec<&Feed>>,
+    feed_stats: &HashMap<String, FeedStats>,
+) {
+    let Some(feeds) = uncategorized else { return; };
+    if feeds.is_empty() { return; }
+    let unread: usize = feeds.iter()
+        .map(|f| feed_stats.get(&f.id).map(|s| s.unread).unwrap_or(0))
+        .sum();
+    entries.push(simple_entry(SidebarKind::Uncategorized, "Uncategorized", unread));
+    let len = feeds.len();
+    for (i, feed) in feeds.iter().enumerate() {
+        entries.push(SidebarEntry {
+            kind: SidebarKind::Feed(feed.id.clone()),
+            label: helpers::feed_label(feed),
+            unread: feed_stats.get(&feed.id).map(|s| s.unread).unwrap_or(0),
+            depth: 1,
+            has_error: feed.error_count > 0,
+            is_last_child: i == len - 1,
+        });
+    }
+}
+
+fn push_static_entries(entries: &mut Vec<SidebarEntry>, data: &BrowserData) {
+    let read_later_count = data.marks.values().filter(|m| m.read_later).count();
+    entries.push(simple_entry(SidebarKind::ReadLater, "Read Later", read_later_count));
+    entries.push(simple_entry(SidebarKind::RecentlyRead, "Recently Read", 0));
+    for board in &data.boards {
+        let count = data.board_items.iter().filter(|bi| bi.board_id == board.id).count();
+        entries.push(simple_entry(SidebarKind::Board(board.id.clone()), format!("[B] {}", board.name), count));
+    }
+    for watch in &data.watches {
+        entries.push(simple_entry(SidebarKind::Watch(watch.id.clone()), format!("[W] {}", watch.name), 0));
     }
 }

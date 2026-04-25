@@ -3,7 +3,6 @@ pub mod curate;
 pub mod discover;
 pub mod feed_mgmt;
 pub mod folder;
-pub mod mute;
 pub mod opml;
 pub mod read;
 pub mod stats;

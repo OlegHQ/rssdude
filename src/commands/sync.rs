@@ -16,6 +16,9 @@ use crate::shared::output::*;
 // Sync
 // ---------------------------------------------------------------------------
 
+/// Callback type for sync progress: (completed, total, &result, total_new_so_far).
+pub type SyncProgressCb = Box<dyn Fn(usize, usize, &SyncFeedResult, usize) + Send + Sync>;
+
 #[derive(Serialize, Clone)]
 pub struct SyncFeedResult {
     pub feed: String,
@@ -34,7 +37,12 @@ pub struct SyncResult {
 }
 
 /// Core: sync feeds, returns structured result.
-pub async fn sync_core(db: Arc<Database<'static>>, feed_id: Option<String>) -> Result<SyncResult> {
+/// Optional `on_progress` callback is called after each feed with (completed, total, &SyncFeedResult, total_new_so_far).
+pub async fn sync_core(
+    db: Arc<Database<'static>>,
+    feed_id: Option<String>,
+    on_progress: Option<SyncProgressCb>,
+) -> Result<SyncResult> {
     let db2 = Arc::clone(&db);
     let feeds: Vec<Feed> = spawn_blocking(move || {
         let r = db2.r_transaction()?;
@@ -50,14 +58,16 @@ pub async fn sync_core(db: Arc<Database<'static>>, feed_id: Option<String>) -> R
     let mut total_new = 0;
     let mut sync_results = Vec::new();
 
-    for f in &feeds {
+    for (i, f) in feeds.iter().enumerate() {
         let title = f.title.clone().unwrap_or_else(|| f.url.clone());
         let result = match feed::fetch_feed_conditional(&f.url, f.etag.as_deref(), f.last_modified.as_deref()).await {
             Ok(r) => r,
             Err(e) => {
-                sync_results.push(SyncFeedResult {
+                let r = SyncFeedResult {
                     feed: f.id.clone(), title, new_items: 0, status: "error".into(), error: Some(format!("{e:#}")),
-                });
+                };
+                if let Some(cb) = &on_progress { cb(i + 1, feeds.len(), &r, total_new); }
+                sync_results.push(r);
                 continue;
             }
         };
@@ -65,9 +75,11 @@ pub async fn sync_core(db: Arc<Database<'static>>, feed_id: Option<String>) -> R
         let fetch = match result {
             Some(r) => r,
             None => {
-                sync_results.push(SyncFeedResult {
+                let r = SyncFeedResult {
                     feed: f.id.clone(), title, new_items: 0, status: "up_to_date".into(), error: None,
-                });
+                };
+                if let Some(cb) = &on_progress { cb(i + 1, feeds.len(), &r, total_new); }
+                sync_results.push(r);
                 continue;
             }
         };
@@ -102,9 +114,11 @@ pub async fn sync_core(db: Arc<Database<'static>>, feed_id: Option<String>) -> R
         }).await??;
 
         total_new += new_count;
-        sync_results.push(SyncFeedResult {
+        let result = SyncFeedResult {
             feed: f.id.clone(), title, new_items: new_count, status: "synced".into(), error: None,
-        });
+        };
+        if let Some(cb) = &on_progress { cb(i + 1, feeds.len(), &result, total_new); }
+        sync_results.push(result);
     }
 
     Ok(SyncResult { feeds_synced: feeds.len(), new_items: total_new, results: sync_results })
@@ -112,7 +126,7 @@ pub async fn sync_core(db: Arc<Database<'static>>, feed_id: Option<String>) -> R
 
 pub async fn sync(db: Arc<Database<'static>>, json: bool, feed_id: Option<String>) -> Result<()> {
     if !json { println!("Syncing..."); }
-    let result = sync_core(Arc::clone(&db), feed_id).await?;
+    let result = sync_core(Arc::clone(&db), feed_id, None).await?;
 
     // Auto-cleanup
     let config = crate::shared::config::Config::load().unwrap_or_default();
@@ -170,16 +184,9 @@ pub async fn run_cleanup(db: Arc<Database<'static>>, retention: &RetentionConfig
 
             if let Some(ref dur) = mark_after {
                 if age > *dur && !mark.as_ref().is_some_and(|m| m.read) {
-                    let new_mark = Mark {
-                        item_id: item.id.clone(),
-                        read: true,
-                        starred: mark.as_ref().is_some_and(|m| m.starred),
-                        note: mark.as_ref().and_then(|m| m.note.clone()),
-                        marked_at: chrono::Utc::now().to_rfc3339(),
-                        read_at: Some(chrono::Utc::now().to_rfc3339()),
-                        opened_at: mark.as_ref().and_then(|m| m.opened_at.clone()),
-                        read_later: mark.as_ref().is_some_and(|m| m.read_later),
-                    };
+                    let mut new_mark = Mark::from_existing(item.id.clone(), mark.as_ref());
+                    new_mark.read = true;
+                    new_mark.read_at = Some(new_mark.marked_at.clone());
                     let _: Option<Mark> = rw.upsert(new_mark)?;
                     marked_read += 1;
                 }
@@ -301,36 +308,37 @@ pub async fn status(db: Arc<Database<'static>>, json: bool) -> Result<()> {
 // Folder stats helper
 // ---------------------------------------------------------------------------
 
+fn roll_up(
+    folder: &Folder,
+    children: &HashMap<Option<String>, Vec<&Folder>>,
+    feeds_by_folder: &HashMap<String, Vec<&Feed>>,
+    feed_unread: &HashMap<String, usize>,
+    rows: &mut Vec<FolderStat>,
+) -> (usize, usize) {
+    let direct = feeds_by_folder.get(&folder.id).cloned().unwrap_or_default();
+    let mut fc = direct.len();
+    let mut ur: usize = direct.iter().map(|f| feed_unread.get(&f.id).copied().unwrap_or(0)).sum();
+    if let Some(kids) = children.get(&Some(folder.id.clone())) {
+        for kid in kids {
+            let (cf, cu) = roll_up(kid, children, feeds_by_folder, feed_unread, rows);
+            fc += cf; ur += cu;
+        }
+    }
+    rows.push(FolderStat { name: folder.name.clone(), feeds: fc, unread: ur });
+    (fc, ur)
+}
+
 fn build_folder_stats(folders: &[Folder], feeds: &[Feed], feed_unread: &HashMap<String, usize>) -> Vec<FolderStat> {
     let mut children_by_parent: HashMap<Option<String>, Vec<&Folder>> = HashMap::new();
     for folder in folders { children_by_parent.entry(folder.parent_id.clone()).or_default().push(folder); }
-
     let mut feeds_by_folder: HashMap<String, Vec<&Feed>> = HashMap::new();
     for feed in feeds {
         if let Some(ref fid) = feed.folder_id { feeds_by_folder.entry(fid.clone()).or_default().push(feed); }
     }
-
-    fn roll_up(folder: &Folder, children: &HashMap<Option<String>, Vec<&Folder>>,
-               feeds_by_folder: &HashMap<String, Vec<&Feed>>, feed_unread: &HashMap<String, usize>,
-               rows: &mut Vec<FolderStat>) -> (usize, usize) {
-        let direct = feeds_by_folder.get(&folder.id).cloned().unwrap_or_default();
-        let mut fc = direct.len();
-        let mut ur: usize = direct.iter().map(|f| feed_unread.get(&f.id).copied().unwrap_or(0)).sum();
-        if let Some(kids) = children.get(&Some(folder.id.clone())) {
-            for kid in kids {
-                let (cf, cu) = roll_up(kid, children, feeds_by_folder, feed_unread, rows);
-                fc += cf; ur += cu;
-            }
-        }
-        rows.push(FolderStat { name: folder.name.clone(), feeds: fc, unread: ur });
-        (fc, ur)
-    }
-
     let mut rows = Vec::new();
     for folder in children_by_parent.get(&None).cloned().unwrap_or_default() {
         roll_up(folder, &children_by_parent, &feeds_by_folder, feed_unread, &mut rows);
     }
-
     let uncategorized_feeds: usize = feeds.iter().filter(|f| f.folder_id.is_none()).count();
     if uncategorized_feeds > 0 {
         let uncategorized_unread: usize = feeds.iter()

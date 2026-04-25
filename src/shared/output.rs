@@ -67,34 +67,55 @@ pub fn strip_html(html: &str, width: usize) -> String {
     html2text::from_read(html.as_bytes(), width.max(20)).trim().to_string()
 }
 
-/// Print item detail view (Source/Title/Published/URL/body).
-pub fn print_item_detail(source: &str, title: &str, published: &str, url: &str, body: &str) {
-    println!("Source:    {source}");
-    println!("Title:     {title}");
-    println!("Published: {published}");
-    println!("URL:       {url}");
-    println!("---");
-    println!("{body}");
+/// Compute a since-cutoff datetime from a duration string like "24h", "7d".
+pub fn since_cutoff(since: &str) -> anyhow::Result<NaiveDateTime> {
+    Ok(Utc::now().naive_utc() - parse_duration(since)?)
 }
 
-/// Format an item for export in the given format (md, json, text/txt).
-pub fn format_item_export(
-    title: &str, source: &str, published: &str, url: &str,
-    note: &str, content: &str, format: &str,
-) -> String {
+/// Build standard item table rows from raw JSON values: [ID, SOURCE, TITLE, PUBLISHED].
+pub fn item_value_rows(items: &[serde_json::Value]) -> Vec<Vec<String>> {
+    items.iter().map(|i| vec![
+        i["id"].as_str().unwrap_or("").to_string(),
+        i["source"].as_str().unwrap_or("-").to_string(),
+        i["title"].as_str().unwrap_or("-").to_string(),
+        i["published_at"].as_str().map(time_ago).unwrap_or_else(|| "-".into()),
+    ]).collect()
+}
+
+/// Build standard item table rows: [ID, SOURCE, TITLE, PUBLISHED].
+pub fn item_table_rows(items: &[super::db::ItemJson]) -> Vec<Vec<String>> {
+    items.iter().map(|ij| vec![
+        ij.id.clone(),
+        ij.source.clone().unwrap_or("-".into()),
+        ij.title.clone().unwrap_or("-".into()),
+        ij.published_at.as_deref().map(time_ago).unwrap_or("-".into()),
+    ]).collect()
+}
+
+/// Format an item for export in md/json/text format.
+pub fn format_export(item: &super::db::ItemJson, format: &str) -> anyhow::Result<String> {
+    let title = item.title.as_deref().unwrap_or("(untitled)");
+    let source = item.source.as_deref().unwrap_or("-");
+    let published = item.published_at.as_deref().unwrap_or("-");
+    let url = item.link.as_deref().unwrap_or("-");
+    let note = item.note.as_deref().unwrap_or("");
+    let content = item.content.as_deref().or(item.summary.as_deref()).unwrap_or("");
+
     match format {
         "md" | "markdown" => {
             let mut s = format!("# {title}\n\n**Source:** {source}\n**Published:** {published}\n**URL:** {url}\n");
             if !note.is_empty() { s.push_str(&format!("**Note:** {note}\n")); }
             s.push_str(&format!("\n---\n\n{content}"));
-            s
+            Ok(s)
         }
-        _ => {
+        "json" => Ok(serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".to_string())),
+        "text" | "txt" => {
             let mut s = format!("{title}\nSource: {source}\nPublished: {published}\nURL: {url}\n");
             if !note.is_empty() { s.push_str(&format!("Note: {note}\n")); }
             s.push_str(&format!("\n{content}"));
-            s
+            Ok(s)
         }
+        _ => anyhow::bail!("unsupported format: {format} (expected md, json, or text)"),
     }
 }
 

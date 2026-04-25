@@ -206,141 +206,53 @@ pub(super) fn preview_body(item: &Item, width: usize) -> String {
         .as_deref()
         .or(item.summary.as_deref())
         .unwrap_or("(no content)");
-    strip_html(raw, width)
+    crate::shared::output::strip_html(raw, width)
 }
 
-pub(super) fn strip_html(input: &str, width: usize) -> String {
-    html2text::from_read(input.as_bytes(), width.max(20))
-        .trim()
-        .to_string()
-}
-
-/// Extract all complete URLs from text (use on unwrapped text to get full URLs).
+/// Extract all complete URLs from text.
 pub(super) fn extract_urls(text: &str) -> Vec<String> {
-    let mut urls = Vec::new();
-    for (start, _) in text.match_indices("http") {
-        let rest = &text[start..];
-        let url_len = rest.find(|c: char| c.is_whitespace() || c == '>' || c == '"' || c == '\'' || c == ')' || c == ']')
-            .unwrap_or(rest.len());
-        let url = &text[start..start + url_len];
-        if url.starts_with("http://") || url.starts_with("https://") {
-            urls.push(url.to_string());
-        }
-    }
-    urls
+    linkify::LinkFinder::new()
+        .links(text)
+        .filter(|l| matches!(l.kind(), linkify::LinkKind::Url))
+        .map(|l| l.as_str().to_string())
+        .collect()
 }
 
 /// Word-wrap a string to fit within `width` columns.
 pub(super) fn wrap_text(s: &str, width: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    for line in s.lines() {
-        if line.len() <= width {
-            out.push(line.to_string());
-        } else {
-            let mut remaining = line;
-            while remaining.len() > width {
-                let break_at = remaining[..width].rfind(|c: char| c.is_whitespace() || c == '/' || c == '-')
-                    .map(|i| i + 1)
-                    .unwrap_or(width);
-                out.push(remaining[..break_at].to_string());
-                remaining = &remaining[break_at..];
-            }
-            if !remaining.is_empty() {
-                out.push(remaining.to_string());
-            }
-        }
-    }
-    out
+    textwrap::wrap(s, width).into_iter().map(|cow| cow.into_owned()).collect()
 }
 
 pub(super) async fn compute_digest(db: Arc<Database<'static>>, since: &str) -> Result<Vec<String>> {
-    let dur = crate::shared::output::parse_duration(since)?;
-    let cutoff = Utc::now().naive_utc() - dur;
-
-    spawn_blocking(move || {
-        let r = db.r_transaction()?;
-        let all_items: Vec<Item> = r.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
-        let all_feeds: Vec<Feed> = r.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
-        let feed_map: HashMap<String, &Feed> = all_feeds.iter().map(|f| (f.id.clone(), f)).collect();
-
-        let mut grouped: HashMap<String, Vec<&Item>> = HashMap::new();
-        for item in &all_items {
-            if let Some(ref pub_at) = item.published_at {
-                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(pub_at).map(|d| d.naive_utc()) {
-                    if dt >= cutoff {
-                        grouped.entry(item.feed_id.clone()).or_default().push(item);
-                    }
-                }
-            }
+    let digest = crate::commands::discover::digest_core(db, since.to_string(), None).await?;
+    let mut lines = Vec::new();
+    lines.push(format!("Digest: {} new items since {}", digest.total, digest.since));
+    lines.push(String::new());
+    for feed in &digest.feeds {
+        lines.push(format!("{} ({} new)", feed.feed_title, feed.items.len()));
+        for item in feed.items.iter().take(5) {
+            lines.push(format!("  - {}", item.title));
         }
-
-        let mut lines = Vec::new();
-        let total: usize = grouped.values().map(|v| v.len()).sum();
-        lines.push(format!("Digest: {} new items since {}", total, cutoff.format("%Y-%m-%d %H:%M")));
+        if feed.items.len() > 5 {
+            lines.push(format!("  ...and {} more", feed.items.len() - 5));
+        }
         lines.push(String::new());
-
-        let mut feed_ids: Vec<&String> = grouped.keys().collect();
-        feed_ids.sort();
-        for fid in feed_ids {
-            let items = &grouped[fid];
-            let feed_title = feed_map.get(fid).and_then(|f| f.title.as_deref()).unwrap_or(fid);
-            lines.push(format!("{} ({} new)", feed_title, items.len()));
-            for item in items.iter().take(5) {
-                let title = item.title.as_deref().unwrap_or("(untitled)");
-                lines.push(format!("  - {}", title));
-            }
-            if items.len() > 5 {
-                lines.push(format!("  ...and {} more", items.len() - 5));
-            }
-            lines.push(String::new());
-        }
-        Ok::<_, anyhow::Error>(lines)
-    }).await?
+    }
+    Ok(lines)
 }
 
 pub(super) async fn compute_trending(db: Arc<Database<'static>>) -> Result<Vec<String>> {
-    let cutoff = Utc::now().naive_utc() - chrono::Duration::hours(48);
-    let sw = stop_words::get(stop_words::LANGUAGE::English);
-    let stopwords: HashSet<String> = sw.into_iter().collect();
-
-    spawn_blocking(move || {
-        let r = db.r_transaction()?;
-        let all_items: Vec<Item> = r.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
-        let mut word_stats: HashMap<String, (usize, HashSet<String>)> = HashMap::new();
-
-        for item in &all_items {
-            let in_window = item.published_at.as_ref()
-                .and_then(|p| chrono::DateTime::parse_from_rfc3339(p).ok().map(|d| d.naive_utc()))
-                .is_some_and(|dt| dt >= cutoff);
-            if !in_window { continue; }
-            if let Some(ref title) = item.title {
-                for word in title.split_whitespace() {
-                    let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
-                    if w.len() < 2 || stopwords.contains(w.as_str()) { continue; }
-                    let entry = word_stats.entry(w).or_insert_with(|| (0, HashSet::new()));
-                    entry.0 += 1;
-                    entry.1.insert(item.feed_id.clone());
-                }
-            }
-        }
-
-        let mut topics: Vec<(String, usize, usize)> = word_stats.into_iter()
-            .filter(|(_, (_, feeds))| feeds.len() >= 2)
-            .map(|(word, (count, feeds))| (word, count, feeds.len()))
-            .collect();
-        topics.sort_by(|a, b| b.1.cmp(&a.1));
-
-        let mut lines = Vec::new();
-        lines.push(format!("{:<20} {:>8} {:>6}", "TOPIC", "MENTIONS", "FEEDS"));
-        lines.push(String::new());
-        for (topic, mentions, feeds) in topics.iter().take(30) {
-            lines.push(format!("{:<20} {:>8} {:>6}", topic, mentions, feeds));
-        }
-        if topics.is_empty() {
-            lines.push("No trending topics found (need items from 2+ feeds in last 48h).".to_string());
-        }
-        Ok::<_, anyhow::Error>(lines)
-    }).await?
+    let topics = crate::commands::discover::trending_core(db).await?;
+    let mut lines = Vec::new();
+    lines.push(format!("{:<20} {:>8} {:>6}", "TOPIC", "MENTIONS", "FEEDS"));
+    lines.push(String::new());
+    for t in topics.iter().take(30) {
+        lines.push(format!("{:<20} {:>8} {:>6}", t.topic, t.mentions, t.feeds));
+    }
+    if topics.is_empty() {
+        lines.push("No trending topics found (need items from 2+ feeds in last 48h).".to_string());
+    }
+    Ok(lines)
 }
 
 pub(super) async fn export_item_to_file(
@@ -349,45 +261,8 @@ pub(super) async fn export_item_to_file(
     ext: String,
     format_name: String,
 ) -> Result<String> {
-
-    let (item, feed, mark) = spawn_blocking({
-        let db = Arc::clone(&db);
-        let id = item_id.clone();
-        move || {
-            let r = db.r_transaction()?;
-            let item: Item = r.get().primary(id.clone())?
-                .ok_or_else(|| anyhow::anyhow!("item {id} not found"))?;
-            let feed: Option<Feed> = r.get().primary(item.feed_id.clone()).ok().flatten();
-            let mark: Option<Mark> = r.get().primary(item.id.clone()).ok().flatten();
-            Ok::<_, anyhow::Error>((item, feed, mark))
-        }
-    }).await??;
-
-    let title = item.title.as_deref().unwrap_or("(untitled)");
-    let source = feed.as_ref().and_then(|f| f.title.as_deref()).unwrap_or("-");
-    let published = item.published_at.as_deref().unwrap_or("-");
-    let url = item.link.as_deref().unwrap_or("-");
-    let note = mark.as_ref().and_then(|m| m.note.as_deref()).unwrap_or("");
-    let content = item.content.as_deref().or(item.summary.as_deref()).unwrap_or("");
-
-    let output = match ext.as_str() {
-        "md" => {
-            let mut s = format!("# {title}\n\n**Source:** {source}\n**Published:** {published}\n**URL:** {url}\n");
-            if !note.is_empty() { s.push_str(&format!("**Note:** {note}\n")); }
-            s.push_str(&format!("\n---\n\n{content}"));
-            s
-        }
-        "json" => {
-            let json = crate::shared::db::ItemJson::from_parts(&item, feed.as_ref(), mark.as_ref());
-            serde_json::to_string_pretty(&json).unwrap_or_else(|_| "{}".to_string())
-        }
-        _ => {
-            let mut s = format!("{title}\nSource: {source}\nPublished: {published}\nURL: {url}\n");
-            if !note.is_empty() { s.push_str(&format!("Note: {note}\n")); }
-            s.push_str(&format!("\n{content}"));
-            s
-        }
-    };
+    let item_json = crate::commands::curate::export_core(db, item_id.clone()).await?;
+    let output = crate::shared::output::format_export(&item_json, &ext)?;
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let dir = std::path::Path::new(&home).join(".rssdude").join("export");

@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use native_db::Database;
 use tokio::task::spawn_blocking;
 
@@ -23,7 +22,7 @@ pub async fn items_core(db: Arc<Database<'static>>, query: ItemsQuery) -> Result
     let results = spawn_blocking(move || -> Result<Vec<ItemJson>> {
         let r = db.r_transaction().context("read transaction")?;
         let cutoff = if let Some(ref s) = query.since {
-            Some(Utc::now().naive_utc() - parse_duration(s)?)
+            Some(since_cutoff(s)?)
         } else { None };
 
         let valid_feed_ids: Option<HashSet<String>> = if let Some(ref folder_id) = query.folder_id {
@@ -50,7 +49,7 @@ pub async fn items_core(db: Arc<Database<'static>>, query: ItemsQuery) -> Result
             let feed: Option<Feed> = r.get().primary(item.feed_id.clone()).ok().flatten();
             if let Some(ref t) = query.tag {
                 match &feed {
-                    Some(f) if f.tags.split(',').any(|ft| ft.trim().eq_ignore_ascii_case(t)) => {}
+                    Some(f) if f.has_tag(t) => {}
                     _ => continue,
                 }
             }
@@ -69,15 +68,7 @@ pub async fn items(db: Arc<Database<'static>>, json: bool, query: ItemsQuery) ->
     if json {
         print_json(&results);
     } else {
-        let rows: Vec<Vec<String>> = results.iter().map(|ij| {
-            vec![
-                ij.id.clone(),
-                ij.source.clone().unwrap_or("-".into()),
-                ij.title.clone().unwrap_or("-".into()),
-                ij.published_at.as_deref().map(time_ago).unwrap_or("-".into()),
-            ]
-        }).collect();
-        print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &rows);
+        print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &item_table_rows(&results));
     }
     Ok(())
 }
@@ -92,17 +83,10 @@ pub async fn read_item_core(db: Arc<Database<'static>>, id: String) -> Result<It
         drop(r);
 
         let rw = db.rw_transaction()?;
-        let now = Utc::now().to_rfc3339();
         let was_read = mark.as_ref().is_some_and(|m| m.read);
-        let new_mark = Mark {
-            item_id: item.id.clone(), read: true,
-            starred: mark.as_ref().is_some_and(|m| m.starred),
-            note: mark.as_ref().and_then(|m| m.note.clone()),
-            read_at: if !was_read { Some(now.clone()) } else { mark.as_ref().and_then(|m| m.read_at.clone()) },
-            opened_at: mark.as_ref().and_then(|m| m.opened_at.clone()),
-            read_later: mark.as_ref().is_some_and(|m| m.read_later),
-            marked_at: now,
-        };
+        let mut new_mark = Mark::from_existing(item.id.clone(), mark.as_ref());
+        new_mark.read = true;
+        if !was_read { new_mark.read_at = Some(new_mark.marked_at.clone()); }
         let _: Option<Mark> = rw.upsert(new_mark.clone())?;
         rw.commit()?;
         Ok(ItemJson::from_parts(&item, feed.as_ref(), Some(&new_mark)))
@@ -123,7 +107,7 @@ pub async fn read_item(db: Arc<Database<'static>>, json: bool, id: String, open:
         if raw {
             println!("{body}");
         } else {
-            println!("{}", html2text::from_read(body.as_bytes(), 80).trim());
+            println!("{}", strip_html(body, 80));
         }
     }
     if open {
@@ -159,15 +143,7 @@ pub async fn search(db: Arc<Database<'static>>, json: bool, query: String, limit
     if json {
         print_json(&results);
     } else {
-        let rows: Vec<Vec<String>> = results.iter().map(|ij| {
-            vec![
-                ij.id.clone(),
-                ij.source.clone().unwrap_or("-".into()),
-                ij.title.clone().unwrap_or("-".into()),
-                ij.published_at.as_deref().map(time_ago).unwrap_or("-".into()),
-            ]
-        }).collect();
-        print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &rows);
+        print_table(&["ID", "SOURCE", "TITLE", "PUBLISHED"], &item_table_rows(&results));
     }
     Ok(())
 }

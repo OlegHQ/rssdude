@@ -71,65 +71,72 @@ pub async fn delete_core(db: Arc<Database<'static>>, id: String, recursive: bool
     spawn_blocking(move || -> Result<serde_json::Value> {
         let rw = db.rw_transaction()?;
         let folder: Folder = rw.get().primary(id.clone())?.ok_or_else(|| anyhow::anyhow!("Folder not found: {id}"))?;
-        let folder_name = folder.name.clone();
-        let folder_parent = folder.parent_id.clone();
-
         if recursive {
-            let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
-            let folder_ids = collect_descendant_ids(&all_folders, &id);
-
-            let all_feeds: Vec<Feed> = rw.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
-            let mut feeds_deleted = 0;
-            let mut items_deleted = 0;
-            for feed in all_feeds {
-                if !feed.folder_id.as_ref().is_some_and(|fid| folder_ids.contains(fid.as_str())) { continue; }
-                let items: Vec<Item> = rw.scan().secondary::<Item>(ItemKey::feed_id)?
-                    .all()?.filter_map(|i| i.ok()).filter(|i: &Item| i.feed_id == feed.id).collect();
-                for item in &items {
-                    if let Ok(Some(mark)) = rw.get().primary::<Mark>(item.id.clone()) { let _ = rw.remove(mark); }
-                    rw.remove(item.clone())?;
-                }
-                items_deleted += items.len();
-                rw.remove(feed)?;
-                feeds_deleted += 1;
-            }
-            for fid in &folder_ids {
-                if let Ok(Some(f)) = rw.get().primary::<Folder>(fid.clone()) { let _ = rw.remove(f); }
-            }
-            rw.commit()?;
-            Ok(serde_json::json!({
-                "folder": folder_name, "recursive": true,
-                "folders_deleted": folder_ids.len(), "feeds_deleted": feeds_deleted, "items_deleted": items_deleted,
-            }))
+            do_recursive_delete(rw, folder)
         } else {
-            let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
-            let mut reparented_folders = 0;
-            let mut reparented_feeds = 0;
-            for child in all_folders {
-                if child.parent_id.as_deref() == Some(folder.id.as_str()) {
-                    let mut updated = child.clone();
-                    updated.parent_id = folder_parent.clone();
-                    rw.update(child, updated)?;
-                    reparented_folders += 1;
-                }
-            }
-            let all_feeds: Vec<Feed> = rw.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
-            for feed in all_feeds {
-                if feed.folder_id.as_deref() == Some(folder.id.as_str()) {
-                    let mut updated = feed.clone();
-                    updated.folder_id = folder_parent.clone();
-                    rw.update(feed, updated)?;
-                    reparented_feeds += 1;
-                }
-            }
-            rw.remove(folder)?;
-            rw.commit()?;
-            Ok(serde_json::json!({
-                "folder": folder_name, "recursive": false,
-                "reparented_folders": reparented_folders, "reparented_feeds": reparented_feeds,
-            }))
+            do_reparent_delete(rw, folder)
         }
     }).await?
+}
+
+fn do_recursive_delete(rw: native_db::transaction::RwTransaction<'_>, folder: Folder) -> Result<serde_json::Value> {
+    let folder_name = folder.name.clone();
+    let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
+    let folder_ids = collect_descendant_ids(&all_folders, &folder.id);
+    let all_feeds: Vec<Feed> = rw.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
+    let mut feeds_deleted = 0;
+    let mut items_deleted = 0;
+    for feed in all_feeds {
+        if !feed.folder_id.as_ref().is_some_and(|fid| folder_ids.contains(fid.as_str())) { continue; }
+        let items: Vec<Item> = rw.scan().secondary::<Item>(ItemKey::feed_id)?
+            .all()?.filter_map(|i| i.ok()).filter(|i: &Item| i.feed_id == feed.id).collect();
+        for item in &items {
+            if let Ok(Some(mark)) = rw.get().primary::<Mark>(item.id.clone()) { let _ = rw.remove(mark); }
+            rw.remove(item.clone())?;
+        }
+        items_deleted += items.len();
+        rw.remove(feed)?;
+        feeds_deleted += 1;
+    }
+    for fid in &folder_ids {
+        if let Ok(Some(f)) = rw.get().primary::<Folder>(fid.clone()) { let _ = rw.remove(f); }
+    }
+    rw.commit()?;
+    Ok(serde_json::json!({
+        "folder": folder_name, "recursive": true,
+        "folders_deleted": folder_ids.len(), "feeds_deleted": feeds_deleted, "items_deleted": items_deleted,
+    }))
+}
+
+fn do_reparent_delete(rw: native_db::transaction::RwTransaction<'_>, folder: Folder) -> Result<serde_json::Value> {
+    let folder_name = folder.name.clone();
+    let folder_parent = folder.parent_id.clone();
+    let all_folders: Vec<Folder> = rw.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
+    let mut reparented_folders = 0;
+    let mut reparented_feeds = 0;
+    for child in all_folders {
+        if child.parent_id.as_deref() == Some(folder.id.as_str()) {
+            let mut updated = child.clone();
+            updated.parent_id = folder_parent.clone();
+            rw.update(child, updated)?;
+            reparented_folders += 1;
+        }
+    }
+    let all_feeds: Vec<Feed> = rw.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
+    for feed in all_feeds {
+        if feed.folder_id.as_deref() == Some(folder.id.as_str()) {
+            let mut updated = feed.clone();
+            updated.folder_id = folder_parent.clone();
+            rw.update(feed, updated)?;
+            reparented_feeds += 1;
+        }
+    }
+    rw.remove(folder)?;
+    rw.commit()?;
+    Ok(serde_json::json!({
+        "folder": folder_name, "recursive": false,
+        "reparented_folders": reparented_folders, "reparented_feeds": reparented_feeds,
+    }))
 }
 
 /// Core: list folders as tree, returns (tree_nodes, uncategorized_feeds).
@@ -187,7 +194,7 @@ pub async fn list(db: Arc<Database<'static>>, json: bool) -> Result<()> {
         }
         let mut folders_by_parent: HashMap<Option<String>, Vec<Folder>> = HashMap::new();
         for folder in folders { folders_by_parent.entry(folder.parent_id.clone()).or_default().push(folder); }
-        for group in folders_by_parent.values_mut() { group.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase())); }
+        for group in folders_by_parent.values_mut() { group.sort_by_cached_key(|f| f.name.to_lowercase()); }
         for group in feeds_by_folder.values_mut() {
             group.sort_by(|a, b| {
                 let an = a.0.title.as_deref().unwrap_or(&a.0.url);

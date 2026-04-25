@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::Utc;
 use native_db::Database;
 use serde::Serialize;
 use tokio::task::spawn_blocking;
@@ -32,8 +31,7 @@ pub struct DigestItem {
 
 /// Core: produce digest data.
 pub async fn digest_core(db: Arc<Database<'static>>, since: String, tag: Option<String>) -> Result<Digest> {
-    let dur = parse_duration(&since)?;
-    let cutoff = Utc::now().naive_utc() - dur;
+    let cutoff = since_cutoff(&since)?;
 
     spawn_blocking(move || -> Result<Digest> {
         let r = db.r_transaction().context("read transaction")?;
@@ -41,7 +39,7 @@ pub async fn digest_core(db: Arc<Database<'static>>, since: String, tag: Option<
         let valid_feed_ids: Option<HashSet<String>> = if let Some(ref t) = tag {
             let all_feeds: Vec<Feed> = r.scan().primary::<Feed>()?.all()?.filter_map(|f| f.ok()).collect();
             Some(all_feeds.iter()
-                .filter(|f| f.tags.split(',').any(|ft| ft.trim().eq_ignore_ascii_case(t)))
+                .filter(|f| f.has_tag(t))
                 .map(|f| f.id.clone()).collect())
         } else { None };
 
@@ -99,7 +97,7 @@ pub struct TrendingTopic {
 
 /// Core: compute trending topics.
 pub async fn trending_core(db: Arc<Database<'static>>) -> Result<Vec<TrendingTopic>> {
-    let cutoff = Utc::now().naive_utc() - chrono::Duration::hours(48);
+    let cutoff = since_cutoff("48h")?;
     let sw = stop_words::get(stop_words::LANGUAGE::English);
     let stopwords: HashSet<String> = sw.into_iter().collect();
 
@@ -130,7 +128,7 @@ pub async fn trending_core(db: Arc<Database<'static>>) -> Result<Vec<TrendingTop
             .map(|(word, (count, feeds, latest))| TrendingTopic {
                 topic: word, mentions: count, feeds: feeds.len(), latest: time_ago(&latest),
             }).collect();
-        topics.sort_by(|a, b| b.mentions.cmp(&a.mentions));
+        topics.sort_by_key(|t| std::cmp::Reverse(t.mentions));
         Ok(topics)
     }).await?
 }
@@ -162,8 +160,7 @@ pub async fn match_keywords_core(
     limit: usize,
     since: String,
 ) -> Result<Vec<MatchResult>> {
-    let dur = parse_duration(&since)?;
-    let cutoff = Utc::now().naive_utc() - dur;
+    let cutoff = since_cutoff(&since)?;
     let kw_list: Vec<String> = keywords.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
 
     spawn_blocking(move || -> Result<Vec<MatchResult>> {
