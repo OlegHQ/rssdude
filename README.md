@@ -1,95 +1,81 @@
-# 📡 rssdude
+# rssdude
 
-**Your feeds. Your machine. Your rules.**
+A small, local-first RSS reader written in Rust. One binary, three modes:
 
-rssdude is a local-first RSS reader written in Rust. It speaks three dialects out of the same binary:
+- a TUI for reading (vim keys)
+- a CLI for scripting (everything supports `--json`)
+- an optional HTTP server, if you want one machine to hold the DB and the rest to read from it
 
-- 🖥️  a vim-flavoured **TUI** for reading
-- ⚡ a scriptable **CLI** for automation and pipelines
-- 🌐 an optional **HTTP server** when you want one machine to own the database and the rest to be thin clients
+Everything lives in `~/.rssdude/`. No accounts, no cloud, nothing phones home.
 
-No accounts. No cloud. No tracking. One file in `~/.rssdude/` holds everything you've ever subscribed to.
+![rssdude](demo/rssdude.gif)
 
-![rssdude in action](demo/rssdude.gif)
+The asciinema source is at `demo/rssdude.cast` if you'd rather scrub through it: `asciinema play demo/rssdude.cast`.
 
-> 🎬 Prefer to scrub through it interactively? The recording lives in [`demo/rssdude.cast`](demo/rssdude.cast) — `asciinema play demo/rssdude.cast`.
+## Why
 
----
+Cloud readers keep dying. Self-hosted ones keep wanting a docker-compose, a Postgres, and a weekend. I wanted something that installs with `cargo install`, keeps my data in a single file, and stays out of the way.
 
-## ✨ Why
+The codebase is small on purpose. It's the kind of thing you can read end-to-end in one sitting if you want to know what's happening to your data.
 
-Cloud readers vanish (RIP Reader, RIP everything since). Self-hosted readers want a docker-compose, a database, and your weekend. rssdude wants `cargo install` and ~5 MB of disk.
+## Install
 
-It's also a deliberate experiment in keeping a codebase small: the entire thing — TUI, CLI, server, parser glue, storage layer — sits under 8k lines of Rust. Every file is auditable in an afternoon.
-
----
-
-## 🚀 Install
-
-### macOS (Homebrew + cargo)
+macOS:
 
 ```bash
-brew install libiconv          # keg-only, needed for the linker
+brew install libiconv      # keg-only, the linker needs it
 git clone https://github.com/OlegHQ/rssdude && cd rssdude
-make install                    # installs to ~/.cargo/bin/rssdude
+make install               # ~/.cargo/bin/rssdude
 ```
 
-### Linux
+Linux:
 
 ```bash
 git clone https://github.com/OlegHQ/rssdude && cd rssdude
-cargo install --path .          # ~/.cargo/bin/rssdude
+cargo install --path .
 ```
 
-Make sure `~/.cargo/bin` is on your `PATH`. Override the install prefix with `make install PREFIX=/usr/local`.
+Make sure `~/.cargo/bin` is on your `PATH`. You can override the prefix with `make install PREFIX=/usr/local`.
 
-### Other Make targets
+Other Make targets:
 
 | Target | What it does |
 |--------|--------------|
 | `make build`     | Release build into `target/release/rssdude` |
-| `make install`   | `cargo install` to `$(PREFIX)/bin` (default `~/.cargo`) |
+| `make install`   | `cargo install` to `$(PREFIX)/bin` |
 | `make uninstall` | Remove the installed binary |
-| `make test`      | Run unit + snapshot tests |
+| `make test`      | Unit + snapshot tests |
 | `make clippy`    | Lint with `-D warnings` |
-| `make run ARGS="items --unread"` | Quick `cargo run` passthrough |
+| `make run ARGS="items --unread"` | `cargo run` passthrough |
 
----
-
-## 🏃 Quick start
+## Quick start
 
 ```bash
-# subscribe
 rssdude add https://hnrss.org/frontpage --tag tech
 rssdude add https://blog.anthropic.com/rss --tag ai
 
-# pull new content
 rssdude sync
 
-# read in the TUI (just run with no args)
-rssdude
+rssdude                          # opens the TUI
 
-# or stay in the shell
 rssdude items --unread --limit 10
 rssdude search "transformer"
 rssdude digest --since 24h
 rssdude trending
 ```
 
-Every command supports `--json` for clean machine-readable output. Pipe into `jq`, glue into shell scripts, ship summaries to Slack — the CLI is designed to compose.
+Every command takes `--json`, so output composes with `jq` and shell pipelines.
 
----
+## TUI keybindings
 
-## ⌨️ TUI keybindings
-
-The TUI is three panes — sidebar, item list, preview — and a vim-shaped brain.
+Three panes: sidebar, item list, preview.
 
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Move down / up |
+| `j` / `k` | Down / up |
 | `h` / `l` | Switch panes |
 | `Tab` / `Shift-Tab` | Cycle panes |
-| `1` / `3` | Collapse sidebar / preview |
+| `1` / `3` | Toggle sidebar / preview |
 | `Enter` | Open item, or descend into a pane |
 | `Space` | Toggle read |
 | `*` | Toggle star |
@@ -101,11 +87,9 @@ The TUI is three panes — sidebar, item list, preview — and a vim-shaped brai
 | `Ctrl-d` / `Ctrl-u` | Half-page scroll |
 | `q` | Quit |
 
-Mouse works too — click panes to focus, click URLs in the preview to open them, scroll wheel scrolls.
+Mouse works too: click to focus a pane, click a URL in the preview to open it, scroll wheel scrolls.
 
----
-
-## 🛠 CLI reference
+## CLI reference
 
 ```text
 rssdude add <url> [--tag <tag>] [--folder <id>]
@@ -134,13 +118,11 @@ rssdude move-feed <feed-id> --folder <folder-id>
 rssdude serve [--bind 0.0.0.0:8484]
 ```
 
-Durations parse the obvious things: `24h`, `7d`, `2w`, `90m`. Folders nest arbitrarily deep and inherit unread counts up the tree.
+Durations are the obvious ones: `24h`, `7d`, `2w`, `90m`. Folders nest as deep as you want and unread counts roll up.
 
----
+## Server mode
 
-## 🌐 Server mode
-
-Want one machine to be the source of truth and your laptop / phone-tunnel / second laptop to read from it? Drop a config file:
+If you want one machine to hold the database and read from a laptop, phone tunnel, or another box, drop a config file:
 
 ```toml
 # ~/.rssdude/config.toml
@@ -150,46 +132,38 @@ address = "192.168.1.100:8484"
 ```
 
 ```bash
-rssdude serve --bind 0.0.0.0:8484   # on the host
-rssdude items --unread               # transparently proxies on the client
+rssdude serve --bind 0.0.0.0:8484    # on the host
+rssdude items --unread                # on the client, hits the server
 ```
 
-Same binary on both ends. No config = standalone mode, no behaviour change. The HTTP layer is a thin shell over the same command functions the CLI calls.
+Same binary on both sides. No config means standalone mode. The HTTP layer is a thin shell over the same command functions the CLI calls, so behaviour matches everywhere.
 
----
-
-## 💾 Where things live
+## Where things live
 
 | Path | Purpose |
 |------|---------|
-| `~/.rssdude/rssdude.redb`   | The database — single file, easy to back up or move |
-| `~/.rssdude/config.toml`    | Optional server / client config |
-| `$RSSDUDE_DB_PATH`          | Override the DB location |
+| `~/.rssdude/rssdude.redb`   | The database. One file. Copy it to back up. |
+| `~/.rssdude/config.toml`    | Optional server/client config |
+| `$RSSDUDE_DB_PATH`          | Override the DB path |
 
-The DB is `native_db` on top of `redb` — embedded, typed, transactional. No SQL, no migrations folder, no daemon.
+Storage is `native_db` on top of `redb`: embedded, typed, transactional. No SQL, no migrations directory, no daemon.
 
----
+## Built with
 
-## 🧱 Built with
+`tokio`, `native_db` on `redb`, `ratatui`, `axum`, `feed-rs`, `reqwest` (with conditional GETs), `tabled`, `html2text`.
 
-[`tokio`](https://tokio.rs) for async  ·  [`native_db`](https://github.com/vincent-herleworx/native_db) on [`redb`](https://github.com/cberner/redb) for storage  ·  [`ratatui`](https://ratatui.rs) for the TUI  ·  [`axum`](https://github.com/tokio-rs/axum) for the server  ·  [`feed-rs`](https://github.com/feed-rs/feed-rs) for parsing  ·  [`reqwest`](https://github.com/seanmonstar/reqwest) for fetching with conditional GETs  ·  [`tabled`](https://github.com/zhiburt/tabled) for table output  ·  [`html2text`](https://github.com/jugglerchris/rust-html2text) for the preview pane
+## Contributing
 
----
+There's a simplification pipeline in `AGENTS.md`. The short version:
 
-## 🤝 Contributing
+- no backwards-compatibility shims
+- prefer a crate over a hand-rolled utility
+- duplicated logic gets extracted
+- functions stay under 40 lines
+- tests must catch real bugs, not assert tautologies
 
-The codebase enforces a strict simplification pipeline (see `AGENTS.md`):
+PRs that delete code while keeping behaviour are the most welcome kind.
 
-- ✋ no backwards-compatibility shims, ever
-- 📚 prefer crates over hand-rolled utilities
-- 🔁 duplicate logic gets extracted on sight
-- 📏 functions stay under 40 lines, files prefer single responsibility
-- 🧪 tests must catch real bugs, not assert tautologies
+## License
 
-PRs that move us toward fewer lines doing the same job are the most welcome kind.
-
----
-
-## 📄 License
-
-MIT. Do whatever you want.
+MIT.
