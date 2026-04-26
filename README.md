@@ -66,8 +66,8 @@ rssdude add https://blog.anthropic.com/rss --tag ai
 # pull new content
 rssdude sync
 
-# read in the TUI
-rssdude browse
+# read in the TUI (just run with no args)
+rssdude
 
 # or stay in the shell
 rssdude items --unread --limit 10

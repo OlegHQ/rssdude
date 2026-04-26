@@ -65,6 +65,42 @@ type_run "rssdude digest --since 24h"
 note "everything also speaks --json for piping"
 type_run "rssdude items --unread --limit 2 --json | jq '.[].title'"
 
-sleep 0.6
-note "👋 that's rssdude. there's a TUI too: 'rssdude browse'"
+note "and there's a full TUI — just run 'rssdude' with no args"
+sleep 0.4
+
+# --- TUI segment via tmux ----------------------------------------------------
+# We need a real pty for the TUI; tmux gives us one inside asciinema's pty.
+SESSION="rssdemo-$$"
+tmux kill-session -t "$SESSION" 2>/dev/null || true
+
+tmux new-session -d -s "$SESSION" -x 110 -y 30 \
+    "RSSDUDE_DB_PATH=$RSSDUDE_DB_PATH rssdude"
+
+# Drive keys in the background while we attach in the foreground
+(
+    sleep 2.0
+    tmux send-keys -t "$SESSION" "j" ;        sleep 0.55
+    tmux send-keys -t "$SESSION" "j" ;        sleep 0.55
+    tmux send-keys -t "$SESSION" "j" ;        sleep 0.55
+    tmux send-keys -t "$SESSION" "Tab" ;      sleep 0.8
+    tmux send-keys -t "$SESSION" "j" ;        sleep 0.55
+    tmux send-keys -t "$SESSION" "j" ;        sleep 0.55
+    tmux send-keys -t "$SESSION" "*" ;        sleep 0.7
+    tmux send-keys -t "$SESSION" "Space" ;    sleep 0.7
+    tmux send-keys -t "$SESSION" "j" ;        sleep 0.5
+    tmux send-keys -t "$SESSION" "Tab" ;      sleep 0.7
+    tmux send-keys -t "$SESSION" "C-d" ;      sleep 0.6
+    tmux send-keys -t "$SESSION" "C-d" ;      sleep 0.7
+    tmux send-keys -t "$SESSION" "C-u" ;      sleep 0.7
+    sleep 0.4
+    tmux send-keys -t "$SESSION" "q" ;        sleep 0.4
+) &
+DRIVER_PID=$!
+
+tmux attach -t "$SESSION" || true
+wait $DRIVER_PID 2>/dev/null || true
+
+clear
+sleep 0.3
+note "👋 that's rssdude — local-first, scriptable, fast."
 sleep 1.2
