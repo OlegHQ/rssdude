@@ -10,6 +10,10 @@ rssdude is a local-first RSS reader written in Rust. It speaks three dialects ou
 
 No accounts. No cloud. No tracking. One file in `~/.rssdude/` holds everything you've ever subscribed to.
 
+![rssdude in action](demo/rssdude.gif)
+
+> 🎬 Prefer to scrub through it interactively? The recording lives in [`demo/rssdude.cast`](demo/rssdude.cast) — `asciinema play demo/rssdude.cast`.
+
 ---
 
 ## ✨ Why
