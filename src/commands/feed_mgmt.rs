@@ -15,16 +15,22 @@ pub async fn add_core(
     tags: Vec<String>,
     folder: Option<String>,
 ) -> Result<(Feed, usize)> {
-    if let Some(ref fid) = folder {
+    {
         let db2 = Arc::clone(&db);
-        let fid2 = fid.clone();
-        let f = spawn_blocking(move || {
+        let url2 = url.clone();
+        let folder2 = folder.clone();
+        spawn_blocking(move || -> Result<()> {
             let r = db2.r_transaction()?;
-            Ok::<_, anyhow::Error>(r.get().primary::<Folder>(fid2.clone())?)
+            if r.get().secondary::<Feed>(FeedKey::url, url2.clone())?.is_some() {
+                anyhow::bail!("Feed already exists: {url2}");
+            }
+            if let Some(ref fid) = folder2 {
+                if r.get().primary::<Folder>(fid.clone())?.is_none() {
+                    anyhow::bail!("Folder not found: {fid}");
+                }
+            }
+            Ok(())
         }).await??;
-        if f.is_none() {
-            anyhow::bail!("Folder not found: {fid}");
-        }
     }
 
     let result = feed::fetch_feed(&url).await?;
@@ -87,10 +93,15 @@ pub async fn list(db: Arc<Database<'static>>, json: bool, tag: Option<String>) -
         print_json(&feeds);
     } else {
         let rows: Vec<Vec<String>> = feeds.iter().map(|f| {
+            let last_synced = match (f.error_count, f.last_synced.as_deref()) {
+                (n, Some(_)) if n > 0 => format!("FAILED x{n}"),
+                (_, Some(t)) => time_ago(t),
+                (_, None) => "never".into(),
+            };
             vec![
                 f.id.clone(), f.title.as_deref().unwrap_or(&f.url).to_string(), f.url.clone(),
                 f.tags.join(","), f.folder_name.clone().unwrap_or_default(), f.item_count.to_string(),
-                f.last_synced.as_deref().map(time_ago).unwrap_or_else(|| "never".into()),
+                last_synced,
             ]
         }).collect();
         print_table(&["ID", "TITLE", "URL", "TAGS", "FOLDER", "ITEMS", "LAST SYNCED"], &rows);

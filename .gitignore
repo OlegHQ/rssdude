@@ -1,3 +1,5 @@
 /target
 .envrc
 *.redb
+.claude/scheduled_tasks.lock
+.cursor/

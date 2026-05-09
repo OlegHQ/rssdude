@@ -290,7 +290,6 @@ impl App {
                 .is_none_or(|cutoff| item.published_at.as_ref()
                     .and_then(|p| crate::shared::output::parse_datetime(p).ok())
                     .is_some_and(|dt| dt >= *cutoff)))
-            .filter(|item| !is_muted(item, data.feed_lookup.get(&item.feed_id), &data.mute_filters))
             .map(|item| VisibleItem {
                 item: item.clone(),
                 feed: data.feed_lookup.get(&item.feed_id).cloned(),

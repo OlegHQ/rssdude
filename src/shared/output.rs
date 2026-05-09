@@ -99,20 +99,22 @@ pub fn format_export(item: &super::db::ItemJson, format: &str) -> anyhow::Result
     let published = item.published_at.as_deref().unwrap_or("-");
     let url = item.link.as_deref().unwrap_or("-");
     let note = item.note.as_deref().unwrap_or("");
-    let content = item.content.as_deref().or(item.summary.as_deref()).unwrap_or("");
+    let raw = item.content.as_deref().or(item.summary.as_deref()).unwrap_or("");
 
     match format {
         "md" | "markdown" => {
+            let body = strip_html(raw, 80);
             let mut s = format!("# {title}\n\n**Source:** {source}\n**Published:** {published}\n**URL:** {url}\n");
             if !note.is_empty() { s.push_str(&format!("**Note:** {note}\n")); }
-            s.push_str(&format!("\n---\n\n{content}"));
+            s.push_str(&format!("\n---\n\n{body}\n"));
             Ok(s)
         }
         "json" => Ok(serde_json::to_string_pretty(item).unwrap_or_else(|_| "{}".to_string())),
         "text" | "txt" => {
+            let body = strip_html(raw, 80);
             let mut s = format!("{title}\nSource: {source}\nPublished: {published}\nURL: {url}\n");
             if !note.is_empty() { s.push_str(&format!("Note: {note}\n")); }
-            s.push_str(&format!("\n{content}"));
+            s.push_str(&format!("\n{body}\n"));
             Ok(s)
         }
         _ => anyhow::bail!("unsupported format: {format} (expected md, json, or text)"),

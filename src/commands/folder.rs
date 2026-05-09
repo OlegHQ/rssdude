@@ -139,44 +139,12 @@ fn do_reparent_delete(rw: native_db::transaction::RwTransaction<'_>, folder: Fol
     }))
 }
 
-/// Core: list folders as tree, returns (tree_nodes, uncategorized_feeds).
+/// Core: build the folder/feed tree and return the same JSON shape consumed by
+/// the CLI text renderer, the `--json` mode, and the HTTP client. Uncategorized
+/// feeds appear as a synthetic trailing node with `id == ""`.
 pub async fn list_core(db: Arc<Database<'static>>) -> Result<serde_json::Value> {
-    spawn_blocking(move || {
+    let (root_nodes, uncategorized) = spawn_blocking(move || -> Result<TreeRoots> {
         let r = db.r_transaction()?;
-        let folders: Vec<Folder> = r.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
-        let feeds: Vec<Feed> = r.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
-        let items: Vec<Item> = r.scan().primary::<Item>()?.all()?.filter_map(|x| x.ok()).collect();
-        let marks: Vec<Mark> = r.scan().primary::<Mark>()?.all()?.filter_map(|x| x.ok()).collect();
-
-        let stats_map = compute_feed_stats(&items, &marks);
-
-        let folder_json: Vec<FolderJson> = folders.iter().map(FolderJson::from).collect();
-        let feed_json: Vec<serde_json::Value> = feeds.iter().map(|f| {
-            serde_json::json!({
-                "id": f.id, "title": f.title, "url": f.url,
-                "folder_id": f.folder_id,
-                "unread": stats_map.get(&f.id).map(|s| s.unread).unwrap_or(0),
-            })
-        }).collect();
-
-        Ok::<_, anyhow::Error>(serde_json::json!({ "folders": folder_json, "feeds": feed_json }))
-    }).await?
-}
-
-// ---------------------------------------------------------------------------
-// CLI wrappers
-// ---------------------------------------------------------------------------
-
-pub async fn create(db: Arc<Database<'static>>, json: bool, name: String, parent: Option<String>) -> Result<()> {
-    let folder = create_core(db, name, parent).await?;
-    if json { print_json(&FolderJson::from(&folder)); } else { println!("Created folder: {} (id: {})", folder.name, folder.id); }
-    Ok(())
-}
-
-pub async fn list(db: Arc<Database<'static>>, json: bool) -> Result<()> {
-    let db2 = Arc::clone(&db);
-    let tree = spawn_blocking(move || {
-        let r = db2.r_transaction()?;
         let folders: Vec<Folder> = r.scan().primary::<Folder>()?.all()?.filter_map(|x| x.ok()).collect();
         let feeds: Vec<Feed> = r.scan().primary::<Feed>()?.all()?.filter_map(|x| x.ok()).collect();
         let items: Vec<Item> = r.scan().primary::<Item>()?.all()?.filter_map(|x| x.ok()).collect();
@@ -196,37 +164,81 @@ pub async fn list(db: Arc<Database<'static>>, json: bool) -> Result<()> {
         for folder in folders { folders_by_parent.entry(folder.parent_id.clone()).or_default().push(folder); }
         for group in folders_by_parent.values_mut() { group.sort_by_cached_key(|f| f.name.to_lowercase()); }
         for group in feeds_by_folder.values_mut() {
-            group.sort_by(|a, b| {
-                let an = a.0.title.as_deref().unwrap_or(&a.0.url);
-                let bn = b.0.title.as_deref().unwrap_or(&b.0.url);
-                an.to_lowercase().cmp(&bn.to_lowercase())
-            });
+            group.sort_by_key(|a| a.0.display_title().to_lowercase());
         }
         let root_nodes = build_tree(None, &mut folders_by_parent, &mut feeds_by_folder);
         let uncategorized = feeds_by_folder.remove(&None).unwrap_or_default();
-        Ok::<_, anyhow::Error>((root_nodes, uncategorized))
+        Ok((root_nodes, uncategorized))
     }).await??;
 
-    let (root_nodes, uncategorized) = tree;
-    if json {
-        let mut json_nodes: Vec<serde_json::Value> = root_nodes.into_iter().map(node_to_json).collect();
-        if !uncategorized.is_empty() {
-            let uncat_unread: usize = uncategorized.iter().map(|(_, u)| *u).sum();
-            json_nodes.push(serde_json::json!({
-                "id": "", "name": "Uncategorized", "parent_id": null, "unread": uncat_unread,
-                "feeds": uncategorized.iter().map(|(f, u)| serde_json::json!({"id": f.id, "title": f.title, "url": f.url, "unread": u})).collect::<Vec<_>>(),
-                "children": [],
-            }));
-        }
-        print_json(&json_nodes);
-    } else {
-        if root_nodes.is_empty() && uncategorized.is_empty() { println!("No folders or feeds."); return Ok(()); }
-        for node in &root_nodes { render_tree_node(node, "", ""); }
-        if !uncategorized.is_empty() {
-            println!("Uncategorized");
-            render_feed_list(&uncategorized, "");
-        }
+    let mut json_nodes: Vec<serde_json::Value> = root_nodes.into_iter().map(node_to_json).collect();
+    if !uncategorized.is_empty() {
+        let uncat_unread: usize = uncategorized.iter().map(|(_, u)| *u).sum();
+        json_nodes.push(serde_json::json!({
+            "id": "", "name": "Uncategorized", "parent_id": null, "unread": uncat_unread,
+            "feeds": uncategorized.iter().map(|(f, u)| serde_json::json!({"id": f.id, "title": f.display_title(), "url": f.url, "unread": u})).collect::<Vec<_>>(),
+            "children": [],
+        }));
     }
+    Ok(serde_json::Value::Array(json_nodes))
+}
+
+/// Render the tree returned by `list_core` (or fetched from the server) as
+/// indented text. Empty input prints the standard "no folders" message.
+pub fn render_tree_json(value: &serde_json::Value) {
+    let nodes = value.as_array().map(|v| v.as_slice()).unwrap_or(&[]);
+    if nodes.is_empty() { println!("No folders or feeds."); return; }
+    for node in nodes { render_json_node(node, "", ""); }
+}
+
+fn render_json_node(node: &serde_json::Value, header_prefix: &str, child_prefix: &str) {
+    let name = node["name"].as_str().unwrap_or("?");
+    let unread = node["unread"].as_u64().unwrap_or(0);
+    let feeds = node["feeds"].as_array().map(|v| v.as_slice()).unwrap_or(&[]);
+    let children = node["children"].as_array().map(|v| v.as_slice()).unwrap_or(&[]);
+    let is_uncategorized = node["id"].as_str() == Some("");
+    if is_uncategorized {
+        println!("{name}");
+        for (i, f) in feeds.iter().enumerate() {
+            let connector = if i == feeds.len() - 1 { "└── " } else { "├── " };
+            let title = f["title"].as_str().or(f["url"].as_str()).unwrap_or("?");
+            let u = f["unread"].as_u64().unwrap_or(0);
+            println!("{connector}{title:<40} {u} unread");
+        }
+        return;
+    }
+    println!("{header_prefix}{name} ({unread} unread)");
+    let total = children.len() + feeds.len();
+    let mut idx = 0;
+    for child in children {
+        idx += 1;
+        let is_last = idx == total;
+        let (connector, next) = if is_last { ("└── ", format!("{child_prefix}    ")) }
+        else { ("├── ", format!("{child_prefix}│   ")) };
+        render_json_node(child, &format!("{child_prefix}{connector}"), &next);
+    }
+    for f in feeds {
+        idx += 1;
+        let connector = if idx == total { "└── " } else { "├── " };
+        let title = f["title"].as_str().or(f["url"].as_str()).unwrap_or("?");
+        let u = f["unread"].as_u64().unwrap_or(0);
+        println!("{child_prefix}{connector}{title:<40} {u} unread");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI wrappers
+// ---------------------------------------------------------------------------
+
+pub async fn create(db: Arc<Database<'static>>, json: bool, name: String, parent: Option<String>) -> Result<()> {
+    let folder = create_core(db, name, parent).await?;
+    if json { print_json(&FolderJson::from(&folder)); } else { println!("Created folder: {} (id: {})", folder.name, folder.id); }
+    Ok(())
+}
+
+pub async fn list(db: Arc<Database<'static>>, json: bool) -> Result<()> {
+    let tree = list_core(db).await?;
+    if json { print_json(&tree); } else { render_tree_json(&tree); }
     Ok(())
 }
 
@@ -263,6 +275,8 @@ pub async fn delete(db: Arc<Database<'static>>, json: bool, id: String, recursiv
 // Tree helpers
 // ---------------------------------------------------------------------------
 
+type TreeRoots = (Vec<TreeNode>, Vec<(Feed, usize)>);
+
 struct TreeNode {
     folder: Folder,
     feeds: Vec<(Feed, usize)>,
@@ -292,29 +306,3 @@ fn node_to_json(node: TreeNode) -> serde_json::Value {
     })
 }
 
-fn render_tree_node(node: &TreeNode, header_prefix: &str, child_prefix: &str) {
-    println!("{}{} ({} unread)", header_prefix, node.folder.name, node.total_unread);
-    let total_entries = node.children.len() + node.feeds.len();
-    let mut index = 0;
-    for child in &node.children {
-        index += 1;
-        let is_last = index == total_entries;
-        let (connector, next) = if is_last { ("└── ", format!("{}    ", child_prefix)) }
-        else { ("├── ", format!("{}│   ", child_prefix)) };
-        render_tree_node(child, &format!("{child_prefix}{connector}"), &next);
-    }
-    for (feed, unread) in &node.feeds {
-        index += 1;
-        let connector = if index == total_entries { "└── " } else { "├── " };
-        let name = feed.display_title();
-        println!("{child_prefix}{connector}{name:<40} {unread} unread");
-    }
-}
-
-fn render_feed_list(feeds: &[(Feed, usize)], prefix: &str) {
-    for (i, (feed, unread)) in feeds.iter().enumerate() {
-        let connector = if i == feeds.len() - 1 { "└── " } else { "├── " };
-        let name = feed.display_title();
-        println!("{prefix}{connector}{name:<40} {unread} unread");
-    }
-}

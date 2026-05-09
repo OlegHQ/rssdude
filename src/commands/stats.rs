@@ -86,16 +86,22 @@ pub async fn stats_core(
         let feed_map: HashMap<&str, &Feed> = feeds.iter().map(|f| (f.id.as_str(), f)).collect();
         let mark_map: HashMap<&str, &Mark> = marks.iter().map(|m| (m.item_id.as_str(), m)).collect();
 
+        // Window engagement (per-feed, per-folder, dead-feed) by item.published_at:
+        // "did I read the things published this month".
         let window_items: Vec<&Item> = items.iter().filter(|item| {
             item.published_at.as_ref()
                 .and_then(|p| parse_datetime(p).ok())
                 .is_some_and(|dt| dt >= cutoff)
         }).collect();
-
         let counters = compute_counters(&window_items, &mark_map);
-        let activity = build_activity(&counters, since_days);
+
+        // Reading activity (top-line counts, hour buckets) by mark.read_at:
+        // "what I actually read this month, regardless of when it was published".
+        let activity_counters = compute_activity_counters(&items, &marks, cutoff);
+        let activity = build_activity(&activity_counters, since_days);
+        let by_hour = build_hour_buckets(&activity_counters.hour_counts);
+
         let (per_feed, dead_feeds) = build_feed_engagement(&counters, &feed_map, threshold);
-        let by_hour = build_hour_buckets(&counters.hour_counts);
         let by_folder = build_folder_engagement(&folders, &feeds, &counters, &feed_map);
         let streak = compute_streak(&marks, now);
 
@@ -140,6 +146,35 @@ fn compute_counters(items: &[&Item], mark_map: &HashMap<&str, &Mark>) -> Counter
             *c.feed_opened.entry(item.feed_id.clone()).or_default() += 1;
         }
         if mark.is_some_and(|m| m.starred) { c.total_starred += 1; }
+    }
+    c
+}
+
+/// Activity counters keyed off mark.read_at within the window — these answer
+/// "what did I actually read this month", which is independent of when the
+/// items were published.
+fn compute_activity_counters(items: &[Item], marks: &[Mark], cutoff: chrono::NaiveDateTime) -> Counters {
+    let item_map: HashMap<&str, &Item> = items.iter().map(|i| (i.id.as_str(), i)).collect();
+    let mut c = Counters {
+        total_read: 0, total_opened: 0, total_starred: 0,
+        feed_read: HashMap::new(), feed_opened: HashMap::new(), feed_skipped: HashMap::new(),
+        hour_counts: [0; 8],
+    };
+    for mark in marks {
+        let Some(read_at) = mark.read_at.as_ref().and_then(|s| parse_datetime(s).ok())
+        else { continue };
+        if read_at < cutoff { continue; }
+        if !mark.read { continue; }
+        c.total_read += 1;
+        c.hour_counts[read_at.time().hour() as usize / 3] += 1;
+        if mark.starred { c.total_starred += 1; }
+        if let Some(item) = item_map.get(mark.item_id.as_str()) {
+            *c.feed_read.entry(item.feed_id.clone()).or_default() += 1;
+            if mark.opened_at.is_some() {
+                c.total_opened += 1;
+                *c.feed_opened.entry(item.feed_id.clone()).or_default() += 1;
+            }
+        }
     }
     c
 }
@@ -230,11 +265,10 @@ fn compute_streak(marks: &[Mark], now: chrono::NaiveDateTime) -> u32 {
 pub async fn stats(
     db: Arc<Database<'static>>,
     json: bool,
-    since: Option<String>,
+    since: String,
     dead_threshold: Option<f32>,
 ) -> Result<()> {
-    let since_str = since.unwrap_or_else(|| "30d".into());
-    let result = stats_core(db, &since_str, dead_threshold).await?;
+    let result = stats_core(db, &since, dead_threshold).await?;
 
     if json {
         print_json(&result);

@@ -140,7 +140,18 @@ impl App {
                     ConfirmAction::DeleteBoard { board_id },
                 ));
             }
-            _ => self.set_flash("Select a feed, folder, or board to delete.".to_string(), true),
+            SidebarKind::Watch(watch_id) => {
+                let name = self.data.as_ref()
+                    .and_then(|d| d.watches.iter().find(|w| w.id == watch_id))
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| "watch".into());
+                self.modal = Some(Self::make_confirm_modal(
+                    "Delete watch",
+                    format!("Delete watch \"{name}\"?"),
+                    ConfirmAction::DeleteWatch { watch_id },
+                ));
+            }
+            _ => self.set_flash("Select a feed, folder, board, or watch to delete.".to_string(), true),
         }
     }
 

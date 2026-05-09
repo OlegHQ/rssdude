@@ -27,7 +27,6 @@ pub(super) async fn load_browser_data(db: Arc<Database<'static>>) -> Result<Brow
             .all()?
             .filter_map(|row| row.ok())
             .collect();
-        let mute_filters: Vec<MuteFilter> = r.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
         let boards: Vec<Board> = r.scan().primary()?.all()?.filter_map(|b| b.ok()).collect();
         let board_items: Vec<BoardItem> = r.scan().primary()?.all()?.filter_map(|b| b.ok()).collect();
         let watches: Vec<SavedSearch> = r.scan().primary()?.all()?.filter_map(|s| s.ok()).collect();
@@ -61,7 +60,6 @@ pub(super) async fn load_browser_data(db: Arc<Database<'static>>) -> Result<Brow
             feed_stats,
             total_unread,
             total_starred,
-            mute_filters,
             boards,
             board_items,
             watches,
@@ -271,6 +269,11 @@ pub(super) async fn delete_board_action(db: Arc<Database<'static>>, id: String) 
 pub(super) async fn create_watch_action(db: Arc<Database<'static>>, name: String, query: String) -> Result<String> {
     let ss = crate::commands::watch::create_core(db, name, query).await?;
     Ok(format!("Created watch \"{}\".", ss.name))
+}
+
+pub(super) async fn delete_watch_action(db: Arc<Database<'static>>, id: String) -> Result<String> {
+    let name = crate::commands::watch::delete_core(db, id).await?;
+    Ok(format!("Deleted watch \"{name}\"."))
 }
 
 pub(super) async fn import_opml_action(db: Arc<Database<'static>>, path: String) -> Result<String> {

@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 use native_db::Database;
 use tokio::task::spawn_blocking;
@@ -20,4 +20,16 @@ pub async fn create_core(db: Arc<Database<'static>>, name: String, query: String
         Ok(())
     }).await??;
     Ok(ss)
+}
+
+pub async fn delete_core(db: Arc<Database<'static>>, id: String) -> Result<String> {
+    spawn_blocking(move || -> Result<String> {
+        let rw = db.rw_transaction()?;
+        let ss: SavedSearch = rw.get().primary(id.clone())?
+            .with_context(|| format!("watch {id} not found"))?;
+        let name = ss.name.clone();
+        rw.remove(ss)?;
+        rw.commit()?;
+        Ok(name)
+    }).await?
 }

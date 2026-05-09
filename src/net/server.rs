@@ -27,7 +27,22 @@ struct ApiError(anyhow::Error);
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         let msg = format!("{:#}", self.0);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": msg}))).into_response()
+        let lower = msg.to_lowercase();
+        let status = if lower.contains("not found") {
+            StatusCode::NOT_FOUND
+        } else if lower.contains("already exists") {
+            StatusCode::CONFLICT
+        } else if lower.contains("unauthorized") {
+            StatusCode::UNAUTHORIZED
+        } else if lower.contains("invalid")
+            || lower.contains("unsupported")
+            || lower.contains("would create a cycle")
+        {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        (status, Json(serde_json::json!({"error": msg}))).into_response()
     }
 }
 
@@ -73,6 +88,7 @@ pub fn router(db: Arc<Database<'static>>, token: Option<String>) -> Router {
         .route("/api/folders/{id}", delete(delete_folder))
         .route("/api/folders/{id}/rename", put(rename_folder))
         .route("/api/folders/{id}/move", put(move_folder))
+        .route("/api/opml", get(get_opml).post(post_opml))
         .with_state(state)
 }
 
@@ -183,8 +199,8 @@ struct MarkReq { #[serde(default)] read: bool, #[serde(default)] star: bool, not
 
 async fn mark_item(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(req): Json<MarkReq>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let (_, mark) = commands::curate::mark_core(s.db, id, req.read.then_some(true), req.star.then_some(true), req.note).await?;
-    Ok(Json(serde_json::json!(mark)))
+    let (item, mark) = commands::curate::mark_core(s.db, id, req.read.then_some(true), req.star.then_some(true), req.note).await?;
+    Ok(Json(serde_json::json!({"item_title": item.title, "mark": mark})))
 }
 
 #[derive(Deserialize)]
@@ -288,4 +304,21 @@ async fn delete_folder(State(s): State<AppState>, headers: axum::http::HeaderMap
     check_auth(&s, &headers).await?;
     let result = commands::folder::delete_core(s.db, id, q.recursive).await?;
     Ok(Json(result))
+}
+
+// --- OPML ---
+
+#[derive(Deserialize)]
+struct OpmlImportReq { content: String }
+
+async fn post_opml(State(s): State<AppState>, headers: axum::http::HeaderMap, Json(req): Json<OpmlImportReq>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let result = commands::opml::import_core(s.db, req.content).await?;
+    Ok(Json(serde_json::json!(result)))
+}
+
+async fn get_opml(State(s): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let xml = commands::opml::export_core(s.db).await?;
+    Ok(Json(serde_json::json!({"opml": xml})))
 }

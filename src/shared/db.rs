@@ -152,18 +152,6 @@ pub struct SavedSearch {
     pub created_at: String,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
-#[native_model(id = 8, version = 1)]
-#[native_db]
-pub struct MuteFilter {
-    #[primary_key]
-    pub id: String,
-    pub pattern: String,
-    pub filter_type: String,
-    pub expires_at: Option<String>,
-    pub created_at: String,
-}
-
 // ---------------------------------------------------------------------------
 // Static model registry
 // ---------------------------------------------------------------------------
@@ -177,7 +165,6 @@ pub static MODELS: Lazy<Models> = Lazy::new(|| {
     models.define::<Board>().expect("Board model");
     models.define::<BoardItem>().expect("BoardItem model");
     models.define::<SavedSearch>().expect("SavedSearch model");
-    models.define::<MuteFilter>().expect("MuteFilter model");
     models
 });
 
@@ -208,8 +195,18 @@ pub fn db_path() -> String {
     format!("{home}/.rssdude/rssdude.redb")
 }
 
+/// URL-safe alphabet for IDs. Drops `-` and `_` from nanoid's SAFE alphabet so
+/// IDs never start with a character clap interprets as a flag prefix.
+const ID_ALPHABET: [char; 62] = [
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z',
+];
+
 pub fn gen_id() -> String {
-    nanoid::nanoid!(8, &nanoid::alphabet::SAFE)
+    nanoid::nanoid!(8, &ID_ALPHABET)
 }
 
 /// BFS to collect a folder and all its descendants. Shared helper.
@@ -274,6 +271,12 @@ pub struct FeedJson {
     pub folder_name: Option<String>,
     #[serde(default)]
     pub item_count: usize,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub error_count: u32,
+    #[serde(default)]
+    pub last_success_at: Option<String>,
 }
 
 impl From<&Feed> for FeedJson {
@@ -289,6 +292,9 @@ impl From<&Feed> for FeedJson {
             folder_id: f.folder_id.clone(),
             folder_name: None,
             item_count: 0,
+            last_error: f.last_error.clone(),
+            error_count: f.error_count,
+            last_success_at: f.last_success_at.clone(),
         }
     }
 }
@@ -353,25 +359,3 @@ impl ItemJson {
     }
 }
 
-/// Check if an item is muted by any active filter.
-pub fn is_muted(item: &Item, feed: Option<&Feed>, filters: &[MuteFilter]) -> bool {
-    let now = chrono::Utc::now().to_rfc3339();
-    for f in filters {
-        if f.expires_at.as_ref().is_some_and(|exp| exp.as_str() < now.as_str()) { continue; }
-        let pattern = f.pattern.to_lowercase();
-        match f.filter_type.as_str() {
-            "title" => {
-                if item.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&pattern)) { return true; }
-            }
-            "feed" => {
-                if feed.is_some_and(|f| f.display_title().to_lowercase().contains(&pattern) || f.url.to_lowercase().contains(&pattern)) { return true; }
-            }
-            _ => {
-                // "keyword" or default: match title or content
-                if item.title.as_ref().is_some_and(|t| t.to_lowercase().contains(&pattern)) { return true; }
-                if item.summary.as_ref().is_some_and(|s| s.to_lowercase().contains(&pattern)) { return true; }
-            }
-        }
-    }
-    false
-}

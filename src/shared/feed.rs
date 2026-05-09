@@ -97,7 +97,8 @@ async fn parse_feed_response(resp: reqwest::Response, url: &str) -> Result<Fetch
 /// Fetch and parse a feed from URL.
 pub async fn fetch_feed(url: &str) -> Result<FetchResult> {
     let resp = HTTP.get(url).header(header::USER_AGENT, "rssdude/0.1")
-        .send().await.with_context(|| format!("failed to fetch {url}"))?;
+        .send().await.with_context(|| format!("failed to fetch {url}"))?
+        .error_for_status().with_context(|| format!("HTTP error from {url}"))?;
     parse_feed_response(resp, url).await
 }
 
@@ -111,6 +112,7 @@ pub async fn fetch_feed_conditional(
     if let Some(lm) = last_modified { req = req.header(header::IF_MODIFIED_SINCE, lm); }
     let resp = req.send().await.with_context(|| format!("failed to fetch {url}"))?;
     if resp.status() == reqwest::StatusCode::NOT_MODIFIED { return Ok(None); }
+    let resp = resp.error_for_status().with_context(|| format!("HTTP error from {url}"))?;
     Ok(Some(parse_feed_response(resp, url).await?))
 }
 

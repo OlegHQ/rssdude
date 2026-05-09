@@ -129,12 +129,13 @@ impl Client {
                                     .join(",")
                             })
                             .unwrap_or_default(),
-                        String::new(), // folder
-                        String::new(), // item count (not in API response)
-                        f["last_synced"]
-                            .as_str()
-                            .map(time_ago)
-                            .unwrap_or_else(|| "never".into()),
+                        f["folder_name"].as_str().unwrap_or("").to_string(),
+                        f["item_count"].as_u64().unwrap_or(0).to_string(),
+                        match (f["error_count"].as_u64().unwrap_or(0), f["last_synced"].as_str()) {
+                            (n, Some(_)) if n > 0 => format!("FAILED x{n}"),
+                            (_, Some(t)) => time_ago(t),
+                            (_, None) => "never".into(),
+                        },
                     ]
                 })
                 .collect();
@@ -146,7 +147,22 @@ impl Client {
         Ok(())
     }
 
-    pub async fn remove_feed(&self, json: bool, id: String) -> Result<()> {
+    pub async fn remove_feed(&self, json: bool, id: String, yes: bool) -> Result<()> {
+        if !yes && !json {
+            // Peek at the feed list to fetch title + item count before deleting.
+            let feeds = self.get("/api/feeds").await?;
+            let entry = feeds.as_array().and_then(|arr| arr.iter().find(|f| f["id"].as_str() == Some(&id)));
+            let Some(entry) = entry else { anyhow::bail!("Feed not found: {id}"); };
+            let title = entry["title"].as_str().unwrap_or(&id);
+            let count = entry["item_count"].as_u64().unwrap_or(0);
+            eprint!("Remove feed \"{title}\" and {count} items? [y/N] ");
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
         let resp = self.delete(&format!("/api/feeds/{id}")).await?;
         if json {
             print_json(&resp);
@@ -200,6 +216,7 @@ impl Client {
                             let err = r["error"].as_str().unwrap_or("?");
                             eprintln!("  {title}: error: {err}");
                         }
+                        _ if new == 0 => println!("  {title} up to date"),
                         _ => println!("  {title}  {new} new items"),
                     }
                 }
@@ -290,7 +307,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn read_item(&self, json: bool, id: String, open: bool) -> Result<()> {
+    pub async fn read_item(&self, json: bool, id: String, open: bool, raw: bool) -> Result<()> {
         let resp = self.get(&format!("/api/items/{id}")).await?;
         if json {
             print_json(&resp);
@@ -308,7 +325,11 @@ impl Client {
             println!("Published: {published}");
             println!("URL:       {url}");
             println!("---");
-            println!("{body}");
+            if raw {
+                println!("{body}");
+            } else {
+                println!("{}", strip_html(body, 80));
+            }
 
             if open {
                 if let Some(url) = resp["link"].as_str() {
@@ -355,22 +376,14 @@ impl Client {
         if json {
             print_json(&resp);
         } else {
+            let title = resp["item_title"].as_str().unwrap_or("(untitled)");
+            let mark = &resp["mark"];
             let mut parts = Vec::new();
-            if resp["read"].as_bool().unwrap_or(false) {
-                parts.push("read");
-            }
-            if resp["starred"].as_bool().unwrap_or(false) {
-                parts.push("starred");
-            }
-            if resp["note"].as_str().is_some() {
-                parts.push("noted");
-            }
-            let status = if parts.is_empty() {
-                "updated".to_string()
-            } else {
-                parts.join(", ")
-            };
-            println!("Marked as {status}.");
+            if mark["read"].as_bool().unwrap_or(false) { parts.push("read"); }
+            if mark["starred"].as_bool().unwrap_or(false) { parts.push("starred"); }
+            if mark["note"].as_str().is_some() { parts.push("noted"); }
+            let status = if parts.is_empty() { "updated".into() } else { parts.join(", ") };
+            println!("Marked \"{title}\" as {status}.");
         }
         Ok(())
     }
@@ -407,39 +420,13 @@ impl Client {
 
     pub async fn export(&self, json: bool, id: String, format: String) -> Result<()> {
         let resp = self.get(&format!("/api/export/{id}")).await?;
-        let title = resp["title"].as_str().unwrap_or("(untitled)");
-        let source = resp["source"].as_str().unwrap_or("-");
-        let published = resp["published_at"].as_str().unwrap_or("-");
-        let url = resp["link"].as_str().unwrap_or("-");
-        let note = resp["note"].as_str().unwrap_or("");
-        let content = resp["content"]
-            .as_str()
-            .or(resp["summary"].as_str())
-            .unwrap_or("");
-
-        if json || format == "json" {
+        if json {
             print_json(&resp);
-        } else if format == "md" || format == "markdown" {
-            println!("# {title}\n");
-            println!("**Source:** {source}");
-            println!("**Published:** {published}");
-            println!("**URL:** {url}");
-            if !note.is_empty() {
-                println!("**Note:** {note}");
-            }
-            println!("\n---\n");
-            println!("{content}");
-        } else {
-            println!("{title}");
-            println!("Source: {source}");
-            println!("Published: {published}");
-            println!("URL: {url}");
-            if !note.is_empty() {
-                println!("Note: {note}");
-            }
-            println!();
-            println!("{content}");
+            return Ok(());
         }
+        let item: crate::shared::db::ItemJson =
+            serde_json::from_value(resp).context("invalid export response")?;
+        print!("{}", format_export(&item, &format)?);
         Ok(())
     }
 
@@ -447,8 +434,11 @@ impl Client {
     // Discovery
     // ---------------------------------------------------------------------------
 
-    pub async fn digest(&self, json: bool, since: String) -> Result<()> {
-        let path = format!("/api/digest?since={}", urlencoding(&since));
+    pub async fn digest(&self, json: bool, since: String, tag: Option<String>) -> Result<()> {
+        let mut path = format!("/api/digest?since={}", urlencoding(&since));
+        if let Some(ref t) = tag {
+            path.push_str(&format!("&tag={}", urlencoding(t)));
+        }
         let resp = self.get(&path).await?;
         if json {
             print_json(&resp);
@@ -603,18 +593,7 @@ impl Client {
         if json {
             print_json(&resp);
         } else {
-            let folders = as_array(&resp);
-            let rows: Vec<Vec<String>> = folders
-                .iter()
-                .map(|f| {
-                    vec![
-                        f["id"].as_str().unwrap_or("").to_string(),
-                        f["name"].as_str().unwrap_or("").to_string(),
-                        f["parent_id"].as_str().unwrap_or("").to_string(),
-                    ]
-                })
-                .collect();
-            print_table(&["ID", "NAME", "PARENT"], &rows);
+            crate::commands::folder::render_tree_json(&resp);
         }
         Ok(())
     }
@@ -648,6 +627,45 @@ impl Client {
             let name = resp["name"].as_str().unwrap_or("?");
             let parent = resp["parent_id"].as_str().unwrap_or("(none)");
             println!("Moved folder: {name} -> parent {parent}");
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------------
+    // OPML
+    // ---------------------------------------------------------------------------
+
+    pub async fn opml_import(&self, json: bool, file: String) -> Result<()> {
+        let content = tokio::fs::read_to_string(&file)
+            .await
+            .with_context(|| format!("failed to read OPML file: {file}"))?;
+        let resp = self.post("/api/opml", &serde_json::json!({"content": content})).await?;
+        if json {
+            print_json(&resp);
+        } else {
+            let added = resp["feeds_added"].as_u64().unwrap_or(0);
+            let folders = resp["folders_created"].as_u64().unwrap_or(0);
+            let skipped = resp["feeds_skipped"].as_u64().unwrap_or(0);
+            println!("Imported {added} feeds, {folders} folders ({skipped} feeds skipped as duplicates).");
+        }
+        Ok(())
+    }
+
+    pub async fn opml_export(&self, json: bool, output: Option<String>) -> Result<()> {
+        let resp = self.get("/api/opml").await?;
+        if json {
+            print_json(&resp);
+            return Ok(());
+        }
+        let xml = resp["opml"].as_str().context("server returned no OPML content")?;
+        match output {
+            Some(path) => {
+                tokio::fs::write(&path, xml)
+                    .await
+                    .with_context(|| format!("failed to write OPML to {path}"))?;
+                eprintln!("Wrote OPML to {path}");
+            }
+            None => println!("{xml}"),
         }
         Ok(())
     }

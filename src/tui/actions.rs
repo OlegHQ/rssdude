@@ -255,6 +255,9 @@ impl App {
             ConfirmAction::DeleteBoard { board_id } => {
                 self.spawn_action(true, data::delete_board_action(db, board_id));
             }
+            ConfirmAction::DeleteWatch { watch_id } => {
+                self.spawn_action(true, data::delete_watch_action(db, watch_id));
+            }
         }
     }
 }

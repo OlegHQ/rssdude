@@ -63,8 +63,10 @@ pub async fn sync_core(
         let result = match feed::fetch_feed_conditional(&f.url, f.etag.as_deref(), f.last_modified.as_deref()).await {
             Ok(r) => r,
             Err(e) => {
+                let err_msg = format!("{e:#}");
+                record_feed_error(Arc::clone(&db), f.id.clone(), err_msg.clone()).await.ok();
                 let r = SyncFeedResult {
-                    feed: f.id.clone(), title, new_items: 0, status: "error".into(), error: Some(format!("{e:#}")),
+                    feed: f.id.clone(), title, new_items: 0, status: "error".into(), error: Some(err_msg),
                 };
                 if let Some(cb) = &on_progress { cb(i + 1, feeds.len(), &r, total_new); }
                 sync_results.push(r);
@@ -75,6 +77,8 @@ pub async fn sync_core(
         let fetch = match result {
             Some(r) => r,
             None => {
+                // 304 still counts as a successful sync — clear error state.
+                record_feed_success(Arc::clone(&db), f.id.clone()).await.ok();
                 let r = SyncFeedResult {
                     feed: f.id.clone(), title, new_items: 0, status: "up_to_date".into(), error: None,
                 };
@@ -102,12 +106,16 @@ pub async fn sync_core(
                     new += 1;
                 }
             }
-            if let Some(mut updated) = rw.get().primary::<Feed>(feed_id_clone)? {
+            if let Some(updated) = rw.get().primary::<Feed>(feed_id_clone)? {
                 let old = updated.clone();
-                updated.last_synced = Some(now2);
-                updated.etag = new_etag;
-                updated.last_modified = new_lm;
-                rw.update(old, updated)?;
+                let mut next = updated;
+                next.last_synced = Some(now2.clone());
+                next.last_success_at = Some(now2);
+                next.last_error = None;
+                next.error_count = 0;
+                next.etag = new_etag;
+                next.last_modified = new_lm;
+                rw.update(old, next)?;
             }
             rw.commit()?;
             Ok::<_, anyhow::Error>(new)
@@ -122,6 +130,41 @@ pub async fn sync_core(
     }
 
     Ok(SyncResult { feeds_synced: feeds.len(), new_items: total_new, results: sync_results })
+}
+
+/// Record a sync error on a feed: increment `error_count`, set `last_error`.
+async fn record_feed_error(db: Arc<Database<'static>>, feed_id: String, err: String) -> Result<()> {
+    spawn_blocking(move || {
+        let rw = db.rw_transaction()?;
+        if let Some(updated) = rw.get().primary::<Feed>(feed_id)? {
+            let old = updated.clone();
+            let mut next = updated;
+            next.last_error = Some(err);
+            next.error_count = next.error_count.saturating_add(1);
+            rw.update(old, next)?;
+        }
+        rw.commit()?;
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+/// Record a successful 304-Not-Modified sync: refresh timestamps, clear error state.
+async fn record_feed_success(db: Arc<Database<'static>>, feed_id: String) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    spawn_blocking(move || {
+        let rw = db.rw_transaction()?;
+        if let Some(updated) = rw.get().primary::<Feed>(feed_id)? {
+            let old = updated.clone();
+            let mut next = updated;
+            next.last_synced = Some(now.clone());
+            next.last_success_at = Some(now);
+            next.last_error = None;
+            next.error_count = 0;
+            rw.update(old, next)?;
+        }
+        rw.commit()?;
+        Ok::<_, anyhow::Error>(())
+    }).await?
 }
 
 pub async fn sync(db: Arc<Database<'static>>, json: bool, feed_id: Option<String>) -> Result<()> {
@@ -143,6 +186,7 @@ pub async fn sync(db: Arc<Database<'static>>, json: bool, feed_id: Option<String
             match r.status.as_str() {
                 "up_to_date" => println!("  {} up to date", r.title),
                 "error" => eprintln!("  {}: error: {}", r.title, r.error.as_deref().unwrap_or("?")),
+                _ if r.new_items == 0 => println!("  {} up to date", r.title),
                 _ => println!("  {}  {} new items", r.title, r.new_items),
             }
         }
@@ -180,24 +224,29 @@ pub async fn run_cleanup(db: Arc<Database<'static>>, retention: &RetentionConfig
         for item in &all_items {
             let Some(pub_dt) = item.published_at.as_ref().and_then(|p| parse_datetime(p).ok()) else { continue };
             let age = now - pub_dt;
-            let mark: Option<Mark> = rw.get().primary(item.id.clone()).ok().flatten();
 
-            if let Some(ref dur) = mark_after {
-                if age > *dur && !mark.as_ref().is_some_and(|m| m.read) {
-                    let mut new_mark = Mark::from_existing(item.id.clone(), mark.as_ref());
-                    new_mark.read = true;
-                    new_mark.read_at = Some(new_mark.marked_at.clone());
-                    let _: Option<Mark> = rw.upsert(new_mark)?;
-                    marked_read += 1;
+            // Decide delete first: if we're going to delete the item, skip the
+            // auto-mark-read upsert entirely so we don't leave an orphaned Mark.
+            let mark: Option<Mark> = rw.get().primary(item.id.clone()).ok().flatten();
+            let will_delete = delete_after.as_ref()
+                .is_some_and(|dur| age > *dur && !mark.as_ref().is_some_and(|m| m.starred));
+
+            if !will_delete {
+                if let Some(ref dur) = mark_after {
+                    if age > *dur && !mark.as_ref().is_some_and(|m| m.read) {
+                        let mut new_mark = Mark::from_existing(item.id.clone(), mark.as_ref());
+                        new_mark.read = true;
+                        new_mark.read_at = Some(new_mark.marked_at.clone());
+                        let _: Option<Mark> = rw.upsert(new_mark)?;
+                        marked_read += 1;
+                    }
                 }
             }
 
-            if let Some(ref dur) = delete_after {
-                if age > *dur && !mark.as_ref().is_some_and(|m| m.starred) {
-                    rw.remove(item.clone())?;
-                    if let Some(m) = mark { rw.remove(m)?; }
-                    deleted += 1;
-                }
+            if will_delete {
+                rw.remove(item.clone())?;
+                if let Some(m) = mark { rw.remove(m)?; }
+                deleted += 1;
             }
         }
 

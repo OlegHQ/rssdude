@@ -133,11 +133,28 @@ enum Command {
         #[arg(long)]
         dead: Option<f32>,
     },
+    /// Import or export OPML
+    Opml {
+        #[command(subcommand)]
+        action: OpmlAction,
+    },
     /// Start server mode
     Serve {
         /// Bind address (e.g. 0.0.0.0:8484)
         #[arg(long)]
         bind: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum OpmlAction {
+    /// Import feeds and folders from an OPML file
+    Import { file: String },
+    /// Export feeds and folders as OPML (stdout by default)
+    Export {
+        /// Write to file instead of stdout
+        #[arg(long)]
+        output: Option<String>,
     },
 }
 
@@ -293,7 +310,7 @@ async fn main() {
             since,
         }) => commands::discover::match_keywords(db, json, keywords, limit, since).await,
         Some(Command::Stats { since, dead }) => {
-            commands::stats::stats(db, json, Some(since), dead).await
+            commands::stats::stats(db, json, since, dead).await
         }
         Some(Command::Folder { action }) => match action {
             FolderAction::Create { name, parent } => {
@@ -307,6 +324,10 @@ async fn main() {
             FolderAction::Delete { id, recursive } => {
                 commands::folder::delete(db, json, id, recursive).await
             }
+        },
+        Some(Command::Opml { action }) => match action {
+            OpmlAction::Import { file } => commands::opml::import(db, json, file).await,
+            OpmlAction::Export { output } => commands::opml::export(db, json, output).await,
         },
     };
 
@@ -326,7 +347,7 @@ async fn dispatch_remote(c: net::client::Client, command: Option<Command>, json:
         Some(Command::Serve { .. }) => unreachable!(),
         Some(Command::Add { url, tag, folder }) => c.add_feed(json, url, tag, folder).await,
         Some(Command::List { tag }) => c.list_feeds(json, tag).await,
-        Some(Command::Remove { id, yes: _ }) => c.remove_feed(json, id).await,
+        Some(Command::Remove { id, yes }) => c.remove_feed(json, id, yes).await,
         Some(Command::MoveFeed { id, folder }) => c.move_feed(json, id, folder).await,
         Some(Command::Sync { feed }) => c.sync(json, feed).await,
         Some(Command::Status) => c.status(json).await,
@@ -338,7 +359,7 @@ async fn dispatch_remote(c: net::client::Client, command: Option<Command>, json:
             feed,
             folder,
         }) => c.items(json, limit, since, tag, unread, feed, folder).await,
-        Some(Command::Read { id, open, raw: _ }) => c.read_item(json, id, open).await,
+        Some(Command::Read { id, open, raw }) => c.read_item(json, id, open, raw).await,
         Some(Command::Search { query, limit }) => c.search(json, query, limit).await,
         Some(Command::Mark {
             id,
@@ -348,7 +369,7 @@ async fn dispatch_remote(c: net::client::Client, command: Option<Command>, json:
         }) => c.mark(json, id, read, star, note).await,
         Some(Command::Starred { limit }) => c.starred(json, limit).await,
         Some(Command::Export { id, format }) => c.export(json, id, format).await,
-        Some(Command::Digest { since, tag: _ }) => c.digest(json, since).await,
+        Some(Command::Digest { since, tag }) => c.digest(json, since, tag).await,
         Some(Command::Trending) => c.trending(json).await,
         Some(Command::Match {
             keywords,
@@ -362,6 +383,10 @@ async fn dispatch_remote(c: net::client::Client, command: Option<Command>, json:
             FolderAction::Rename { id, name } => c.folder_rename(json, id, name).await,
             FolderAction::Move { id, parent } => c.folder_move(json, id, parent).await,
             FolderAction::Delete { id, recursive } => c.folder_delete(json, id, recursive).await,
+        },
+        Some(Command::Opml { action }) => match action {
+            OpmlAction::Import { file } => c.opml_import(json, file).await,
+            OpmlAction::Export { output } => c.opml_export(json, output).await,
         },
     }
 }

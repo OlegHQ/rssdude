@@ -49,7 +49,6 @@ pub(super) struct BrowserData {
     pub(super) feed_stats: HashMap<String, FeedStats>,
     pub(super) total_unread: usize,
     pub(super) total_starred: usize,
-    pub(super) mute_filters: Vec<MuteFilter>,
     pub(super) boards: Vec<Board>,
     pub(super) board_items: Vec<BoardItem>,
     pub(super) watches: Vec<SavedSearch>,
@@ -147,6 +146,7 @@ pub(super) enum ConfirmAction {
     DeleteFolder { folder_id: String, recursive: bool },
     MarkAllRead { scope: String, scope_id: Option<String> },
     DeleteBoard { board_id: String },
+    DeleteWatch { watch_id: String },
 }
 
 pub(super) struct ConfirmModal {
@@ -389,6 +389,10 @@ impl App {
 }
 
 pub async fn run(db: Arc<Database<'static>>) -> Result<()> {
+    use std::io::IsTerminal;
+    if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+        anyhow::bail!("rssdude TUI requires an interactive terminal. Run a subcommand (e.g. `rssdude list`) or pipe input differently.");
+    }
     execute!(stdout(), EnableMouseCapture)?;
     let terminal = ratatui::init();
     let result = run_app(terminal, db).await;

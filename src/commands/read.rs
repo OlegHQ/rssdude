@@ -34,10 +34,15 @@ pub async fn items_core(db: Arc<Database<'static>>, query: ItemsQuery) -> Result
                 .map(|f| f.id.clone()).collect())
         } else { None };
 
-        let all_items: Vec<Item> = r.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        let mut all_items: Vec<Item> = r.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        // Sort newest-first so `--limit` picks the latest items, not random ones.
+        all_items.sort_by(|a, b| {
+            b.published_at.as_deref().unwrap_or("")
+                .cmp(a.published_at.as_deref().unwrap_or(""))
+        });
         let mut collected = Vec::new();
 
-        for item in all_items.into_iter().rev() {
+        for item in all_items {
             if let Some(ref fid) = query.feed_id { if item.feed_id != *fid { continue; } }
             if let Some(ref valid) = valid_feed_ids { if !valid.contains(&item.feed_id) { continue; } }
             if let Some(ref cutoff) = cutoff {
