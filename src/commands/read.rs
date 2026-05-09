@@ -43,6 +43,7 @@ pub async fn items_core(db: Arc<Database<'static>>, query: ItemsQuery) -> Result
         let mut collected = Vec::new();
 
         for item in all_items {
+            if collected.len() >= query.limit { break; }
             if let Some(ref fid) = query.feed_id { if item.feed_id != *fid { continue; } }
             if let Some(ref valid) = valid_feed_ids { if !valid.contains(&item.feed_id) { continue; } }
             if let Some(ref cutoff) = cutoff {
@@ -61,7 +62,6 @@ pub async fn items_core(db: Arc<Database<'static>>, query: ItemsQuery) -> Result
             let mark: Option<Mark> = r.get().primary(item.id.clone()).ok().flatten();
             if query.unread { if let Some(ref m) = mark { if m.read { continue; } } }
             collected.push(ItemJson::from_parts(&item, feed.as_ref(), mark.as_ref()));
-            if collected.len() >= query.limit { break; }
         }
         Ok(collected)
     }).await??;

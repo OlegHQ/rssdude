@@ -165,10 +165,15 @@ pub async fn match_keywords_core(
 
     spawn_blocking(move || -> Result<Vec<MatchResult>> {
         let r = db.r_transaction().context("read transaction")?;
-        let all_items: Vec<Item> = r.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        let mut all_items: Vec<Item> = r.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        // Sort newest-first so `--limit` keeps the latest matches.
+        all_items.sort_by(|a, b| {
+            b.published_at.as_deref().unwrap_or("")
+                .cmp(a.published_at.as_deref().unwrap_or(""))
+        });
         let mut matched = Vec::new();
 
-        for item in all_items.into_iter().rev() {
+        for item in all_items {
             if matched.len() >= limit { break; }
             let in_window = item.published_at.as_ref()
                 .and_then(|p| parse_datetime(p).ok()).is_some_and(|dt| dt >= cutoff);

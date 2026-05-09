@@ -69,7 +69,10 @@ pub fn strip_html(html: &str, width: usize) -> String {
 
 /// Compute a since-cutoff datetime from a duration string like "24h", "7d".
 pub fn since_cutoff(since: &str) -> anyhow::Result<NaiveDateTime> {
-    Ok(Utc::now().naive_utc() - parse_duration(since)?)
+    let dur = parse_duration(since)?;
+    Utc::now().naive_utc()
+        .checked_sub_signed(dur)
+        .ok_or_else(|| anyhow::anyhow!("duration {since:?} is too large to subtract from now"))
 }
 
 /// Build standard item table rows from raw JSON values: [ID, SOURCE, TITLE, PUBLISHED].
