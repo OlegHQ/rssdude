@@ -83,7 +83,7 @@ pub(super) struct VisibleItem {
     pub(super) mark: Option<Mark>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Focus {
     Sidebar,
     Items,
@@ -432,6 +432,10 @@ async fn run_app(mut terminal: DefaultTerminal, db: Arc<Database<'static>>, them
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use std::sync::mpsc::channel;
 
     #[test]
     fn double_click_requires_same_item_within_threshold() {
@@ -447,5 +451,383 @@ mod tests {
         assert!(helpers::is_double_click(Some(&click), 3, same_item_soon));
         assert!(!helpers::is_double_click(Some(&click), 4, same_item_soon));
         assert!(!helpers::is_double_click(Some(&click), 3, same_item_late));
+    }
+
+    // -----------------------------------------------------------------------
+    // Fixtures
+    // -----------------------------------------------------------------------
+
+    fn open_tmp_db() -> Arc<Database<'static>> {
+        // Each test needs its own DB file because redb is single-writer.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = format!(
+            "/tmp/rssdude_tui_test_{}_{}_{}.redb",
+            std::process::id(), n, gen_id()
+        );
+        let _ = std::fs::remove_file(&path);
+        let builder = native_db::Builder::new();
+        let db = builder.create(&MODELS, &path).expect("open tmp db");
+        Arc::new(db)
+    }
+
+    fn now_iso() -> String {
+        chrono::Utc::now().to_rfc3339()
+    }
+
+    fn make_browser_data() -> BrowserData {
+        let folder = Folder { id: "tech".into(), name: "Tech".into(), parent_id: None, created_at: now_iso() };
+        let feed = Feed {
+            id: "feed1".into(),
+            url: "https://example.com/rss".into(),
+            title: Some("Example Feed".into()),
+            description: None,
+            tags: vec!["tech".into()],
+            added_at: now_iso(),
+            last_synced: Some(now_iso()),
+            etag: None,
+            last_modified: None,
+            folder_id: Some("tech".into()),
+            last_error: None,
+            error_count: 0,
+            last_success_at: Some(now_iso()),
+            custom_title: None,
+        };
+        let item_unread = Item {
+            id: "item1".into(),
+            feed_id: "feed1".into(),
+            guid: "guid1".into(),
+            title: Some("Unread Article".into()),
+            link: Some("https://example.com/1".into()),
+            content: Some("<p>This is content for the unread article.</p>".into()),
+            summary: Some("Unread summary".into()),
+            published_at: Some(now_iso()),
+            fetched_at: now_iso(),
+            full_content: None,
+        };
+        let item_starred = Item {
+            id: "item2".into(),
+            feed_id: "feed1".into(),
+            guid: "guid2".into(),
+            title: Some("Starred Article".into()),
+            link: Some("https://example.com/2".into()),
+            content: Some("<p>Body text.</p>".into()),
+            summary: Some("Starred summary".into()),
+            published_at: Some(
+                (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+            ),
+            fetched_at: now_iso(),
+            full_content: None,
+        };
+        let mark_starred = Mark {
+            item_id: "item2".into(),
+            read: true,
+            starred: true,
+            note: Some("kept this one".into()),
+            marked_at: now_iso(),
+            read_at: Some(now_iso()),
+            opened_at: None,
+            read_later: false,
+        };
+
+        let feed_lookup: HashMap<String, Feed> = std::iter::once((feed.id.clone(), feed.clone())).collect();
+        let marks: HashMap<String, Mark> = std::iter::once((mark_starred.item_id.clone(), mark_starred.clone())).collect();
+        let items = vec![item_unread.clone(), item_starred.clone()];
+        let feed_stats = compute_feed_stats(&items, std::slice::from_ref(&mark_starred));
+        let total_unread = feed_stats.values().map(|s| s.unread).sum();
+        let total_starred = feed_stats.values().map(|s| s.starred).sum();
+
+        BrowserData {
+            feeds: vec![feed],
+            folders: vec![folder],
+            items,
+            feed_lookup,
+            marks,
+            feed_stats,
+            total_unread,
+            total_starred,
+            boards: vec![],
+            board_items: vec![],
+            watches: vec![],
+        }
+    }
+
+    fn build_app() -> App {
+        let db = open_tmp_db();
+        let (tx, rx) = channel();
+        let mut app = App::new(db, tx, rx, theme::Theme::dark());
+        app.data = Some(make_browser_data());
+        app
+    }
+
+    fn render(app: &mut App, w: u16, h: u16) -> String {
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).expect("build terminal");
+        terminal.draw(|frame| app.draw(frame)).expect("draw frame");
+        let buffer = terminal.backend().buffer().clone();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    fn key(c: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code: c,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Render tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn render_default_layout_shows_three_panes_and_status() {
+        let mut app = build_app();
+        let frame = render(&mut app, 120, 24);
+        assert!(frame.contains("Feeds"), "Sidebar pane title missing:\n{frame}");
+        assert!(frame.contains("Items"), "Items pane title missing:\n{frame}");
+        assert!(frame.contains("Preview"), "Preview pane title missing:\n{frame}");
+        assert!(frame.contains("Tech"), "Folder label missing:\n{frame}");
+        assert!(frame.contains("Example Feed"), "Feed label missing:\n{frame}");
+        assert!(frame.contains("Unread Article"), "Item title missing:\n{frame}");
+        assert!(frame.contains(" unread"), "Status bar unread count missing:\n{frame}");
+    }
+
+    #[test]
+    fn keypress_q_quits() {
+        let mut app = build_app();
+        assert!(!app.should_quit);
+        app.handle_key(key(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn keypress_question_mark_toggles_help() {
+        let mut app = build_app();
+        assert!(!app.show_help);
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.show_help, "? should open help overlay");
+        // Any subsequent key dismisses help (per current behavior).
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.show_help, "second key should close help");
+    }
+
+    #[test]
+    fn focus_cycles_with_tab() {
+        let mut app = build_app();
+        assert_eq!(app.focus, Focus::Sidebar);
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Items);
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Preview);
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Sidebar);
+    }
+
+    #[test]
+    fn sidebar_toggle_with_1_and_preview_with_3() {
+        let mut app = build_app();
+        assert!(app.show_sidebar);
+        assert!(app.show_preview);
+        app.handle_key(key(KeyCode::Char('1')));
+        assert!(!app.show_sidebar, "1 should hide sidebar");
+        app.handle_key(key(KeyCode::Char('3')));
+        assert!(!app.show_preview, "3 should hide preview");
+        // Layout still renders without panicking.
+        let frame = render(&mut app, 100, 20);
+        assert!(frame.contains("Items"), "Items pane should still render:\n{frame}");
+    }
+
+    #[test]
+    fn render_dump_default_view() {
+        let mut app = build_app();
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---DEFAULT VIEW---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_help_overlay() {
+        let mut app = build_app();
+        app.show_help = true;
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---HELP---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_after_focus_items_and_navigate() {
+        let mut app = build_app();
+        // Move into items pane and step down
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('j')));
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---ITEMS-FOCUS-J---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_visual_mode() {
+        let mut app = build_app();
+        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Char('v')));
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---VISUAL-MODE---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_search_modal() {
+        let mut app = build_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---SEARCH-MODAL---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_sync_in_progress() {
+        let mut app = build_app();
+        app.syncing = Some(SyncState { total: 5, completed: 2, scope: "all".into() });
+        let frame = render(&mut app, 120, 24);
+        eprintln!("---SYNC-PROGRESS---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_flash_message() {
+        let mut app = build_app();
+        app.flash = Some(FlashMessage { text: "Marked 3 items as read".into(), at: Instant::now() });
+        let frame = render(&mut app, 120, 24);
+        eprintln!("---FLASH---\n{frame}---END---");
+    }
+
+    #[test]
+    fn render_dump_no_items() {
+        let mut app = build_app();
+        // Switch to filtering with a query that matches nothing.
+        app.search_query = "zzznothingmatcheszzz".into();
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---NO-ITEMS---\n{frame}---END---");
+    }
+
+    #[test]
+    fn item_navigation_with_empty_list_does_not_panic() {
+        let mut app = build_app();
+        // Make items invisible via a bogus search.
+        app.search_query = "no-match-zzz".into();
+        app.handle_key(key(KeyCode::Tab));         // focus items
+        app.handle_key(key(KeyCode::Char('j')));   // down
+        app.handle_key(key(KeyCode::Char('k')));   // up
+        app.handle_key(key(KeyCode::Char('G')));   // last
+        app.handle_key(key(KeyCode::Char('g')));   // first
+        app.handle_key(key(KeyCode::Enter));       // open
+        // Just shouldn't panic.
+        let _ = render(&mut app, 100, 24);
+    }
+
+    #[test]
+    fn item_navigation_clamps_at_bounds() {
+        let mut app = build_app();
+        app.handle_key(key(KeyCode::Tab)); // focus items
+        // With 2 items, going down 5 times shouldn't blow up the index.
+        for _ in 0..5 { app.handle_key(key(KeyCode::Char('j'))); }
+        assert!(app.item_index < 2, "index escaped bounds: {}", app.item_index);
+        for _ in 0..10 { app.handle_key(key(KeyCode::Char('k'))); }
+        assert_eq!(app.item_index, 0);
+    }
+
+    #[test]
+    fn esc_closes_search_modal() {
+        let mut app = build_app();
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(app.modal.is_some());
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.modal.is_none(), "Esc should close modal");
+    }
+
+    #[test]
+    fn render_dump_light_theme() {
+        let mut app = build_app();
+        app.theme = theme::Theme::light();
+        let frame = render(&mut app, 100, 24);
+        eprintln!("---LIGHT-THEME---\n{frame}---END---");
+    }
+
+    #[test]
+    fn unread_only_filter_keypress_u() {
+        let mut app = build_app();
+        assert!(!app.unread_only);
+        app.handle_key(key(KeyCode::Char('u')));
+        assert!(app.unread_only, "u should toggle unread-only filter");
+        // Visible items should now exclude the read+starred fixture.
+        let visible = app.visible_items();
+        assert!(visible.iter().all(|v| v.mark.as_ref().map(|m| !m.read).unwrap_or(true)));
+    }
+
+    #[test]
+    fn search_modal_opens_with_slash() {
+        let mut app = build_app();
+        assert!(app.modal.is_none());
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(matches!(app.modal, Some(Modal::Input(_))), "/ should open search input modal");
+    }
+
+    #[test]
+    fn render_under_extreme_narrow_width_does_not_panic() {
+        // Resolves a class of off-by-one bugs in min-width layout.
+        let mut app = build_app();
+        // 30 is the minimum reasonable width; below that ratatui may clip.
+        let frame = render(&mut app, 30, 12);
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn render_with_no_data_does_not_panic() {
+        // Boot path: data hasn't loaded yet.
+        let db = open_tmp_db();
+        let (tx, rx) = channel();
+        let mut app = App::new(db, tx, rx, theme::Theme::dark());
+        let frame = render(&mut app, 100, 20);
+        assert!(frame.contains("Feeds"));
+        assert!(frame.contains("Items"));
+        assert!(frame.contains("Preview"));
+    }
+
+    #[test]
+    fn light_theme_renders_distinct_from_dark() {
+        // Sanity-check: switching themes actually changes the rendered output's
+        // color attributes, so theme detection is wired through to the renderer.
+        let mut a_dark = build_app();
+        a_dark.theme = theme::Theme::dark();
+        let mut a_light = build_app();
+        a_light.theme = theme::Theme::light();
+
+        let backend_dark = TestBackend::new(80, 12);
+        let mut td = Terminal::new(backend_dark).unwrap();
+        td.draw(|f| a_dark.draw(f)).unwrap();
+        let buf_d = td.backend().buffer().clone();
+
+        let backend_light = TestBackend::new(80, 12);
+        let mut tl = Terminal::new(backend_light).unwrap();
+        tl.draw(|f| a_light.draw(f)).unwrap();
+        let buf_l = tl.backend().buffer().clone();
+
+        let mut differ = false;
+        for y in 0..buf_d.area.height {
+            for x in 0..buf_d.area.width {
+                if buf_d[(x, y)].fg != buf_l[(x, y)].fg
+                    || buf_d[(x, y)].bg != buf_l[(x, y)].bg
+                {
+                    differ = true;
+                    break;
+                }
+            }
+            if differ { break; }
+        }
+        assert!(differ, "dark and light themes produced identical buffers");
     }
 }

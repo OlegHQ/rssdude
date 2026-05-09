@@ -146,33 +146,33 @@ pub(super) fn draw_items(
             let published = entry.item.published_at.as_deref()
                 .map(time_ago).unwrap_or_else(|| "-".to_string());
 
-            let mut status_spans: Vec<Span> = Vec::new();
-            if is_unread {
-                status_spans.push(Span::styled("\u{25cf}", Style::default().fg(theme.accent_secondary)));
-            }
-            if is_starred {
-                if !status_spans.is_empty() { status_spans.push(Span::styled(" ", Style::default())); }
-                status_spans.push(Span::styled("\u{2605}", Style::default().fg(theme.accent)));
-            }
-            let status_str = if status_spans.is_empty() { String::new() } else {
-                format!(" \u{2022} {}", if is_unread && is_starred { "\u{25cf} \u{2605}" }
-                    else if is_unread { "\u{25cf}" }
-                    else { "\u{2605}" })
-            };
-
-            let meta = format!("  {source} \u{2022} {published}{status_str}");
             let meta_style = if is_vis_selected {
                 Style::default().fg(theme.accent_secondary)
             } else {
                 Style::default().fg(theme.fg_dim)
             };
-            ListItem::new(vec![
-                Line::from(vec![
-                    Span::styled(gutter, gutter_style),
-                    Span::styled(title, title_style),
-                ]),
-                Line::from(Span::styled(meta, meta_style)),
-            ])
+            let unread_style = Style::default().fg(theme.accent_secondary);
+            let star_style = Style::default().fg(theme.accent);
+
+            // Status markers go BEFORE the title so they never get truncated
+            // when the items column is narrow. Keep the prefix a fixed 2-cell
+            // width so titles align across rows.
+            let unread_marker = if is_unread { "\u{25cf}" } else { " " };
+            let star_marker = if is_starred { "\u{2605}" } else { " " };
+
+            let title_line = Line::from(vec![
+                Span::styled(gutter, gutter_style),
+                Span::styled(unread_marker, unread_style),
+                Span::raw(" "),
+                Span::styled(star_marker, star_style),
+                Span::raw(" "),
+                Span::styled(title, title_style),
+            ]);
+            let meta_line = Line::from(Span::styled(
+                format!("      {source} \u{2022} {published}"),
+                meta_style,
+            ));
+            ListItem::new(vec![title_line, meta_line])
         })
         .collect();
 
