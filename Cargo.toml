@@ -1,6 +1,6 @@
 [package]
 name = "rssdude"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
@@ -33,3 +33,7 @@ urlencoding = "2"
 tabled = "0.17"
 linkify = "0.10"
 textwrap = "0.16.2"
+terminal-light = "1"
+
+[dev-dependencies]
+insta = "1"

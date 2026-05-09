@@ -393,18 +393,21 @@ pub async fn run(db: Arc<Database<'static>>) -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         anyhow::bail!("rssdude TUI requires an interactive terminal. Run a subcommand (e.g. `rssdude list`) or pipe input differently.");
     }
+    // Resolve the theme BEFORE entering raw mode so an "auto" config can run
+    // OSC 11 against the terminal in normal cooked mode.
+    let config = crate::shared::config::Config::load().unwrap_or_default();
+    let theme = theme::Theme::from_name(&config.ui.theme);
     execute!(stdout(), EnableMouseCapture)?;
     let terminal = ratatui::init();
-    let result = run_app(terminal, db).await;
+    let result = run_app(terminal, db, theme).await;
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
 
-async fn run_app(mut terminal: DefaultTerminal, db: Arc<Database<'static>>) -> Result<()> {
-    let config = crate::shared::config::Config::load().unwrap_or_default();
+async fn run_app(mut terminal: DefaultTerminal, db: Arc<Database<'static>>, theme: theme::Theme) -> Result<()> {
     let (tx, rx) = channel();
-    let mut app = App::new(db, tx, rx, &config.ui.theme);
+    let mut app = App::new(db, tx, rx, theme);
     app.request_refresh();
     app.start_sync(None);
 

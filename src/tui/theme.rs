@@ -63,11 +63,50 @@ impl Theme {
         }
     }
 
+    /// Build the theme requested by config. `"auto"` (the default) probes the
+    /// terminal background and picks light or dark; explicit names always win.
     pub fn from_name(name: &str) -> Self {
         match name {
             "light" => Self::light(),
+            "dark" => Self::dark(),
             "solarized" => Self::solarized(),
-            _ => Self::dark(),
+            // "auto" or any unknown value → detect.
+            _ => detect_or_dark(),
         }
+    }
+}
+
+/// Probe the terminal background; return `light()` if the bg is bright, else
+/// `dark()`. Falls back to dark on any error or non-terminal stdout.
+fn detect_or_dark() -> Theme {
+    // luma() returns 0.0 (pure black) → 1.0 (pure white). 0.5 is the natural
+    // boundary for "is the background closer to white than black".
+    match terminal_light::luma() {
+        Ok(luma) if luma > 0.5 => Theme::light(),
+        _ => Theme::dark(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_name_matches_explicit_palettes() {
+        // Spot-check distinguishing colors so we know the right palette is built.
+        let dark_fg = Theme::from_name("dark").fg;
+        let light_fg = Theme::from_name("light").fg;
+        let solar_fg = Theme::from_name("solarized").fg;
+        assert_ne!(dark_fg, light_fg);
+        assert_ne!(dark_fg, solar_fg);
+        assert_ne!(light_fg, solar_fg);
+    }
+
+    #[test]
+    fn unknown_name_falls_back_to_a_real_palette() {
+        // "auto" or junk should resolve to either light or dark — both are valid;
+        // the only failure mode is a panic or an empty/unset color.
+        let t = Theme::from_name("totally-not-a-theme");
+        assert!(t.fg == Theme::dark().fg || t.fg == Theme::light().fg);
     }
 }

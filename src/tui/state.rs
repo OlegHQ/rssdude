@@ -1,6 +1,6 @@
 use super::*;
 impl App {
-    pub(super) fn new(db: Arc<Database<'static>>, tx: Sender<AppMessage>, rx: Receiver<AppMessage>, theme_name: &str) -> Self {
+    pub(super) fn new(db: Arc<Database<'static>>, tx: Sender<AppMessage>, rx: Receiver<AppMessage>, theme: theme::Theme) -> Self {
         Self {
             db,
             tx,
@@ -31,7 +31,7 @@ impl App {
             last_item_click: None,
             layout: None,
             preview_links: Vec::new(),
-            theme: theme::Theme::from_name(theme_name),
+            theme,
             collapsed_folders: HashSet::new(),
             visual_mode: false,
             selected_items: HashSet::new(),

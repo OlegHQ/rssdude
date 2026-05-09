@@ -20,7 +20,14 @@ The codebase is small on purpose — small enough to read end-to-end if you ever
 
 ## Install
 
-On macOS:
+On Apple Silicon macs:
+
+```bash
+brew tap OlegHQ/tap
+brew install rssdude
+```
+
+From source on any macOS:
 
 ```bash
 brew install libiconv      # keg-only, the linker needs it
@@ -139,6 +146,15 @@ rssdude items --unread                # on the client — talks to the server
 ```
 
 Same binary on both sides. With no config, it stays standalone. The HTTP layer is a thin shell over the same command functions the CLI uses, so behaviour is the same wherever you run it.
+
+## Theme
+
+The TUI ships with three palettes: `dark`, `light`, and `solarized`. By default it queries the terminal background (OSC 11) and picks `dark` or `light` automatically. Override in `~/.rssdude/config.toml`:
+
+```toml
+[ui]
+theme = "auto"   # or "dark" | "light" | "solarized"
+```
 
 ## Where things live
 

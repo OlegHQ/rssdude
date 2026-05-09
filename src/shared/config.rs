@@ -25,7 +25,7 @@ impl Default for UiConfig {
     }
 }
 
-fn default_theme() -> String { "dark".into() }
+fn default_theme() -> String { "auto".into() }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RetentionConfig {
