@@ -1,0 +1,17 @@
+[book]
+authors = ["Oleg Pustovit"]
+language = "en"
+src = "src"
+title = "rssdude"
+description = "Local-first RSS feed reader and content curation CLI built in Rust"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/OlegHQ/rssdude"
+edit-url-template = "https://github.com/OlegHQ/rssdude/edit/dev/book/{path}"
+site-url = "/rssdude/"
+
+[output.html.fold]
+enable = true
+level = 1
