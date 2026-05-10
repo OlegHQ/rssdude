@@ -3,27 +3,27 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use native_db::Database;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::spawn_blocking;
 
 use crate::shared::db::*;
 use crate::shared::output::*;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Digest {
     pub since: String,
     pub total: usize,
     pub feeds: Vec<DigestFeed>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct DigestFeed {
     pub feed_id: String,
     pub feed_title: String,
     pub items: Vec<DigestItem>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct DigestItem {
     pub id: String,
     pub title: String,
@@ -87,7 +87,7 @@ pub async fn digest(db: Arc<Database<'static>>, json: bool, since: String, tag: 
     Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TrendingTopic {
     pub topic: String,
     pub mentions: usize,

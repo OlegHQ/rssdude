@@ -284,8 +284,10 @@ impl App {
                     }
                 } else if let Some(item) = self.current_item() {
                     let was_read = item.mark.as_ref().is_some_and(|m| m.read);
-                    let db = Arc::clone(&self.db);
-                    self.spawn_action(true, data::toggle_mark_action(db, item.item.id, Some(!was_read), None));
+                    let backend = Arc::clone(&self.backend);
+                    self.spawn_action(true, async move {
+                        backend.toggle_mark(item.item.id, Some(!was_read), None).await
+                    });
                     self.advance_to_next_unread();
                 }
             }

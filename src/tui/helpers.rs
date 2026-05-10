@@ -223,8 +223,8 @@ pub(super) fn wrap_text(s: &str, width: usize) -> Vec<String> {
     textwrap::wrap(s, width).into_iter().map(|cow| cow.into_owned()).collect()
 }
 
-pub(super) async fn compute_digest(db: Arc<Database<'static>>, since: &str) -> Result<Vec<String>> {
-    let digest = crate::commands::discover::digest_core(db, since.to_string(), None).await?;
+pub(super) async fn compute_digest(backend: Arc<Backend>, since: &str) -> Result<Vec<String>> {
+    let digest = backend.digest(since.to_string()).await?;
     let mut lines = Vec::new();
     lines.push(format!("Digest: {} new items since {}", digest.total, digest.since));
     lines.push(String::new());
@@ -241,8 +241,8 @@ pub(super) async fn compute_digest(db: Arc<Database<'static>>, since: &str) -> R
     Ok(lines)
 }
 
-pub(super) async fn compute_trending(db: Arc<Database<'static>>) -> Result<Vec<String>> {
-    let topics = crate::commands::discover::trending_core(db).await?;
+pub(super) async fn compute_trending(backend: Arc<Backend>) -> Result<Vec<String>> {
+    let topics = backend.trending().await?;
     let mut lines = Vec::new();
     lines.push(format!("{:<20} {:>8} {:>6}", "TOPIC", "MENTIONS", "FEEDS"));
     lines.push(String::new());
@@ -256,12 +256,12 @@ pub(super) async fn compute_trending(db: Arc<Database<'static>>) -> Result<Vec<S
 }
 
 pub(super) async fn export_item_to_file(
-    db: Arc<Database<'static>>,
+    backend: Arc<Backend>,
     item_id: String,
     ext: String,
     format_name: String,
 ) -> Result<String> {
-    let item_json = crate::commands::curate::export_core(db, item_id.clone()).await?;
+    let item_json = backend.export_item(item_id.clone()).await?;
     let output = crate::shared::output::format_export(&item_json, &ext)?;
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());

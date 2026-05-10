@@ -38,25 +38,25 @@ impl Client {
         }
     }
 
-    async fn get(&self, path: &str) -> Result<Value> {
+    pub(crate) async fn get(&self, path: &str) -> Result<Value> {
         let req = self.http.get(self.url(path));
         let resp = self.auth(req).send().await.context("server request failed")?;
         self.handle_response(resp).await
     }
 
-    async fn post(&self, path: &str, body: &Value) -> Result<Value> {
+    pub(crate) async fn post(&self, path: &str, body: &Value) -> Result<Value> {
         let req = self.http.post(self.url(path)).json(body);
         let resp = self.auth(req).send().await.context("server request failed")?;
         self.handle_response(resp).await
     }
 
-    async fn put(&self, path: &str, body: &Value) -> Result<Value> {
+    pub(crate) async fn put(&self, path: &str, body: &Value) -> Result<Value> {
         let req = self.http.put(self.url(path)).json(body);
         let resp = self.auth(req).send().await.context("server request failed")?;
         self.handle_response(resp).await
     }
 
-    async fn delete(&self, path: &str) -> Result<Value> {
+    pub(crate) async fn delete(&self, path: &str) -> Result<Value> {
         let req = self.http.delete(self.url(path));
         let resp = self.auth(req).send().await.context("server request failed")?;
         self.handle_response(resp).await
@@ -174,7 +174,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn move_feed(&self, json: bool, id: String, folder_id: String) -> Result<()> {
+    pub async fn move_feed(&self, json: bool, id: String, folder_id: Option<String>) -> Result<()> {
         let resp = self
             .put(
                 &format!("/api/feeds/{id}/move"),

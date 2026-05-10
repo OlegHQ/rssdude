@@ -5,6 +5,7 @@ pub mod feed_mgmt;
 pub mod folder;
 pub mod opml;
 pub mod read;
+pub mod snapshot;
 pub mod stats;
 pub mod sync;
 pub mod watch;

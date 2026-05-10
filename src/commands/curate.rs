@@ -54,6 +54,95 @@ pub async fn mark(db: Arc<Database<'static>>, json: bool, id: String, read: bool
     Ok(())
 }
 
+/// Core: mark all items in a scope as read. Scope is "all", "feed", or "folder".
+/// Returns the number of items newly marked read.
+pub async fn mark_all_read_core(
+    db: Arc<Database<'static>>,
+    scope: String,
+    scope_id: Option<String>,
+) -> Result<usize> {
+    spawn_blocking(move || -> Result<usize> {
+        let rw = db.rw_transaction()?;
+        let items: Vec<Item> = rw.scan().primary()?.all()?.filter_map(|i| i.ok()).collect();
+        let folders: Vec<Folder> = rw.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
+
+        let target_ids: std::collections::HashSet<String> = match (scope.as_str(), &scope_id) {
+            ("feed", Some(fid)) => items.iter().filter(|i| i.feed_id == *fid).map(|i| i.id.clone()).collect(),
+            ("folder", Some(fid)) => {
+                let desc = collect_descendant_ids(&folders, fid);
+                let feeds: Vec<Feed> = rw.scan().primary()?.all()?.filter_map(|f| f.ok()).collect();
+                let feed_ids: std::collections::HashSet<String> = feeds.iter()
+                    .filter(|f| f.folder_id.as_ref().is_some_and(|id| desc.contains(id)))
+                    .map(|f| f.id.clone()).collect();
+                items.iter().filter(|i| feed_ids.contains(&i.feed_id)).map(|i| i.id.clone()).collect()
+            }
+            _ => items.iter().map(|i| i.id.clone()).collect(),
+        };
+
+        let mut count = 0usize;
+        for item_id in &target_ids {
+            let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
+            if existing.as_ref().is_some_and(|m| m.read) { continue; }
+            let mut mark = Mark::from_existing(item_id.clone(), existing.as_ref());
+            mark.read = true;
+            mark.read_at = Some(mark.marked_at.clone());
+            let _: Option<Mark> = rw.upsert(mark)?;
+            count += 1;
+        }
+        rw.commit()?;
+        Ok(count)
+    }).await?
+}
+
+/// Core: toggle the read_later flag on an item. Returns (item, is_now_read_later).
+pub async fn toggle_read_later_core(
+    db: Arc<Database<'static>>,
+    item_id: String,
+) -> Result<(Item, bool)> {
+    spawn_blocking(move || -> Result<(Item, bool)> {
+        let rw = db.rw_transaction()?;
+        let item: Item = rw.get().primary(item_id.clone())?
+            .with_context(|| format!("item {item_id} not found"))?;
+        let existing: Option<Mark> = rw.get().primary(item_id.clone()).ok().flatten();
+        let was_later = existing.as_ref().is_some_and(|m| m.read_later);
+        let mut mark = Mark::from_existing(item_id, existing.as_ref());
+        mark.read_later = !was_later;
+        let now_later = mark.read_later;
+        let _: Option<Mark> = rw.upsert(mark)?;
+        rw.commit()?;
+        Ok((item, now_later))
+    }).await?
+}
+
+/// Core: fetch the full article body for an item, cache it on the Item, return text.
+/// If already cached, returns the cached text without refetching.
+pub async fn fetch_full_article_core(
+    db: Arc<Database<'static>>,
+    item_id: String,
+) -> Result<String> {
+    let db2 = Arc::clone(&db);
+    let id2 = item_id.clone();
+    let (url, existing_full) = spawn_blocking(move || -> Result<(Option<String>, Option<String>)> {
+        let r = db2.r_transaction()?;
+        let item: Item = r.get().primary(id2)?.context("item not found")?;
+        Ok((item.link.clone(), item.full_content.clone()))
+    }).await??;
+    if let Some(content) = existing_full { return Ok(content); }
+    let url = url.context("item has no link")?;
+    let text = crate::shared::feed::fetch_full_article(&url).await?;
+    let text2 = text.clone();
+    spawn_blocking(move || -> Result<()> {
+        let rw = db.rw_transaction()?;
+        let old: Item = rw.get().primary(item_id.clone())?.context("item not found")?;
+        let mut updated = old.clone();
+        updated.full_content = Some(text2);
+        rw.update(old, updated)?;
+        rw.commit()?;
+        Ok(())
+    }).await??;
+    Ok(text)
+}
+
 /// Core: get starred items.
 pub async fn starred_core(db: Arc<Database<'static>>, limit: Option<usize>) -> Result<Vec<ItemJson>> {
     spawn_blocking(move || -> Result<Vec<ItemJson>> {

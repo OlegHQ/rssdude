@@ -89,6 +89,15 @@ pub fn router(db: Arc<Database<'static>>, token: Option<String>) -> Router {
         .route("/api/folders/{id}/rename", put(rename_folder))
         .route("/api/folders/{id}/move", put(move_folder))
         .route("/api/opml", get(get_opml).post(post_opml))
+        .route("/api/snapshot", get(get_snapshot))
+        .route("/api/boards", get(list_boards).post(create_board))
+        .route("/api/boards/{id}", delete(delete_board))
+        .route("/api/boards/{id}/items", post(add_board_item))
+        .route("/api/watches", get(list_watches).post(create_watch))
+        .route("/api/watches/{id}", delete(delete_watch))
+        .route("/api/items/{id}/read_later", put(toggle_read_later))
+        .route("/api/items/{id}/full", post(fetch_full))
+        .route("/api/mark_all_read", post(mark_all_read))
         .with_state(state)
 }
 
@@ -131,11 +140,11 @@ async fn remove_feed(State(s): State<AppState>, headers: axum::http::HeaderMap, 
 }
 
 #[derive(Deserialize)]
-struct MoveFeedReq { folder_id: String }
+struct MoveFeedReq { folder_id: Option<String> }
 
 async fn move_feed(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>, Json(req): Json<MoveFeedReq>) -> ApiResult<serde_json::Value> {
     check_auth(&s, &headers).await?;
-    let (ft, fn_) = commands::feed_mgmt::move_to_folder_core(s.db, id, Some(req.folder_id)).await?;
+    let (ft, fn_) = commands::feed_mgmt::move_to_folder_core(s.db, id, req.folder_id).await?;
     Ok(Json(serde_json::json!({"feed_title": ft, "folder_name": fn_})))
 }
 
@@ -321,4 +330,85 @@ async fn get_opml(State(s): State<AppState>, headers: axum::http::HeaderMap) -> 
     check_auth(&s, &headers).await?;
     let xml = commands::opml::export_core(s.db).await?;
     Ok(Json(serde_json::json!({"opml": xml})))
+}
+
+// --- Snapshot (TUI bulk fetch) ---
+
+async fn get_snapshot(State(s): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult<commands::snapshot::Snapshot> {
+    check_auth(&s, &headers).await?;
+    Ok(Json(commands::snapshot::snapshot_core(s.db).await?))
+}
+
+// --- Boards ---
+
+#[derive(Deserialize)]
+struct CreateBoardReq { name: String }
+
+async fn list_boards(State(s): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let (boards, items) = commands::board::list_core(s.db).await?;
+    Ok(Json(serde_json::json!({"boards": boards, "items": items})))
+}
+
+async fn create_board(State(s): State<AppState>, headers: axum::http::HeaderMap, Json(req): Json<CreateBoardReq>) -> ApiResult<Board> {
+    check_auth(&s, &headers).await?;
+    Ok(Json(commands::board::create_core(s.db, req.name).await?))
+}
+
+async fn delete_board(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let name = commands::board::delete_core(s.db, id).await?;
+    Ok(Json(serde_json::json!({"name": name})))
+}
+
+#[derive(Deserialize)]
+struct AddBoardItemReq { item_id: String, note: Option<String> }
+
+async fn add_board_item(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(board_id): axum::extract::Path<String>, Json(req): Json<AddBoardItemReq>) -> ApiResult<BoardItem> {
+    check_auth(&s, &headers).await?;
+    Ok(Json(commands::board::add_item_core(s.db, board_id, req.item_id, req.note).await?))
+}
+
+// --- Watches ---
+
+#[derive(Deserialize)]
+struct CreateWatchReq { name: String, query: String }
+
+async fn list_watches(State(s): State<AppState>, headers: axum::http::HeaderMap) -> ApiResult<Vec<SavedSearch>> {
+    check_auth(&s, &headers).await?;
+    Ok(Json(commands::watch::list_core(s.db).await?))
+}
+
+async fn create_watch(State(s): State<AppState>, headers: axum::http::HeaderMap, Json(req): Json<CreateWatchReq>) -> ApiResult<SavedSearch> {
+    check_auth(&s, &headers).await?;
+    Ok(Json(commands::watch::create_core(s.db, req.name, req.query).await?))
+}
+
+async fn delete_watch(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let name = commands::watch::delete_core(s.db, id).await?;
+    Ok(Json(serde_json::json!({"name": name})))
+}
+
+// --- Per-item TUI ops ---
+
+async fn toggle_read_later(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let (item, now_later) = commands::curate::toggle_read_later_core(s.db, id).await?;
+    Ok(Json(serde_json::json!({"item_title": item.title, "read_later": now_later})))
+}
+
+async fn fetch_full(State(s): State<AppState>, headers: axum::http::HeaderMap, axum::extract::Path(id): axum::extract::Path<String>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let text = commands::curate::fetch_full_article_core(s.db, id).await?;
+    Ok(Json(serde_json::json!({"length": text.len()})))
+}
+
+#[derive(Deserialize)]
+struct MarkAllReq { scope: String, scope_id: Option<String> }
+
+async fn mark_all_read(State(s): State<AppState>, headers: axum::http::HeaderMap, Json(req): Json<MarkAllReq>) -> ApiResult<serde_json::Value> {
+    check_auth(&s, &headers).await?;
+    let count = commands::curate::mark_all_read_core(s.db, req.scope, req.scope_id).await?;
+    Ok(Json(serde_json::json!({"count": count})))
 }

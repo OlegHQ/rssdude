@@ -1,4 +1,5 @@
 mod actions;
+mod backend;
 mod data;
 mod helpers;
 mod input;
@@ -14,19 +15,19 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
-use native_db::Database;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
-use tokio::task::spawn_blocking;
+
+pub use backend::Backend;
 
 use crate::shared::db::*;
 
@@ -213,7 +214,7 @@ pub(super) struct PreviewLink {
 }
 
 pub(super) struct App {
-    pub(super) db: Arc<Database<'static>>,
+    pub(super) backend: Arc<Backend>,
     pub(super) tx: Sender<AppMessage>,
     pub(super) rx: Receiver<AppMessage>,
     pub(super) data: Option<BrowserData>,
@@ -388,7 +389,7 @@ impl App {
     }
 }
 
-pub async fn run(db: Arc<Database<'static>>) -> Result<()> {
+pub async fn run(backend: Arc<Backend>) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         anyhow::bail!("rssdude TUI requires an interactive terminal. Run a subcommand (e.g. `rssdude list`) or pipe input differently.");
@@ -399,15 +400,15 @@ pub async fn run(db: Arc<Database<'static>>) -> Result<()> {
     let theme = theme::Theme::from_name(&config.ui.theme);
     execute!(stdout(), EnableMouseCapture)?;
     let terminal = ratatui::init();
-    let result = run_app(terminal, db, theme).await;
+    let result = run_app(terminal, backend, theme).await;
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
 
-async fn run_app(mut terminal: DefaultTerminal, db: Arc<Database<'static>>, theme: theme::Theme) -> Result<()> {
+async fn run_app(mut terminal: DefaultTerminal, backend: Arc<Backend>, theme: theme::Theme) -> Result<()> {
     let (tx, rx) = channel();
-    let mut app = App::new(db, tx, rx, theme);
+    let mut app = App::new(backend, tx, rx, theme);
     app.request_refresh();
     app.start_sync(None);
 
@@ -457,7 +458,7 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------------
 
-    fn open_tmp_db() -> Arc<Database<'static>> {
+    fn open_tmp_backend() -> Arc<Backend> {
         // Each test needs its own DB file because redb is single-writer.
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -469,7 +470,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let builder = native_db::Builder::new();
         let db = builder.create(&MODELS, &path).expect("open tmp db");
-        Arc::new(db)
+        Arc::new(Backend::Local(Arc::new(db)))
     }
 
     fn now_iso() -> String {
@@ -554,9 +555,9 @@ mod tests {
     }
 
     fn build_app() -> App {
-        let db = open_tmp_db();
+        let backend = open_tmp_backend();
         let (tx, rx) = channel();
-        let mut app = App::new(db, tx, rx, theme::Theme::dark());
+        let mut app = App::new(backend, tx, rx, theme::Theme::dark());
         app.data = Some(make_browser_data());
         app
     }
@@ -788,9 +789,9 @@ mod tests {
     #[test]
     fn render_with_no_data_does_not_panic() {
         // Boot path: data hasn't loaded yet.
-        let db = open_tmp_db();
+        let backend = open_tmp_backend();
         let (tx, rx) = channel();
-        let mut app = App::new(db, tx, rx, theme::Theme::dark());
+        let mut app = App::new(backend, tx, rx, theme::Theme::dark());
         let frame = render(&mut app, 100, 20);
         assert!(frame.contains("Feeds"));
         assert!(frame.contains("Items"));

@@ -2,20 +2,24 @@ use super::*;
 
 impl App {
     pub(super) fn open_digest_overlay(&mut self) {
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         let tx = self.tx.clone();
         let since = self.since_filter.clone().unwrap_or_else(|| "24h".to_string());
         tokio::spawn(async move {
-            let lines = helpers::compute_digest(db, &since).await.unwrap_or_else(|e| vec![format!("Error: {e:#}")]);
+            let lines = helpers::compute_digest(backend, &since)
+                .await
+                .unwrap_or_else(|e| vec![format!("Error: {e:#}")]);
             let _ = tx.send(AppMessage::DigestReady(lines));
         });
     }
 
     pub(super) fn open_trending_overlay(&mut self) {
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let lines = helpers::compute_trending(db).await.unwrap_or_else(|e| vec![format!("Error: {e:#}")]);
+            let lines = helpers::compute_trending(backend)
+                .await
+                .unwrap_or_else(|e| vec![format!("Error: {e:#}")]);
             let _ = tx.send(AppMessage::TrendingReady(lines));
         });
     }
@@ -34,8 +38,10 @@ impl App {
             return;
         };
         let was_read = item.mark.as_ref().is_some_and(|m| m.read);
-        let db = Arc::clone(&self.db);
-        self.spawn_action(true, data::toggle_mark_action(db, item.item.id, Some(!was_read), None));
+        let backend = Arc::clone(&self.backend);
+        self.spawn_action(true, async move {
+            backend.toggle_mark(item.item.id, Some(!was_read), None).await
+        });
     }
 
     pub(super) fn toggle_current_star(&mut self) {
@@ -44,8 +50,10 @@ impl App {
             return;
         };
         let was_star = item.mark.as_ref().is_some_and(|m| m.starred);
-        let db = Arc::clone(&self.db);
-        self.spawn_action(true, data::toggle_mark_action(db, item.item.id, None, Some(!was_star)));
+        let backend = Arc::clone(&self.backend);
+        self.spawn_action(true, async move {
+            backend.toggle_mark(item.item.id, None, Some(!was_star)).await
+        });
     }
 
     pub(super) fn open_current_link(&mut self) {
@@ -60,8 +68,10 @@ impl App {
         match Command::new("open").arg(&url).spawn() {
             Ok(_) => {
                 self.set_flash(format!("Opened {url}"), false);
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::toggle_mark_action(db, item.item.id, Some(true), None));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move {
+                    backend.toggle_mark(item.item.id, Some(true), None).await
+                });
             }
             Err(err) => self.set_flash(format!("Failed to open link: {err}"), true),
         }
@@ -72,8 +82,8 @@ impl App {
             self.set_flash("Select an item first.".into(), true);
             return;
         };
-        let db = Arc::clone(&self.db);
-        self.spawn_action(true, data::toggle_read_later_action(db, item.item.id));
+        let backend = Arc::clone(&self.backend);
+        self.spawn_action(true, async move { backend.toggle_read_later(item.item.id).await });
     }
 
     pub(super) fn fetch_full_article(&mut self) {
@@ -81,17 +91,17 @@ impl App {
             self.set_flash("Select an item first.".into(), true);
             return;
         };
-        let db = Arc::clone(&self.db);
-        self.spawn_action(true, data::fetch_full_article_action(db, item.item.id));
+        let backend = Arc::clone(&self.backend);
+        self.spawn_action(true, async move { backend.fetch_full_article(item.item.id).await });
     }
 
     pub(super) fn bulk_mark_read(&mut self) {
         let ids: Vec<String> = self.selected_items.drain().collect();
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         let count = ids.len();
         self.spawn_action(true, async move {
             for id in ids {
-                let _ = data::toggle_mark_action(Arc::clone(&db), id, Some(true), None).await;
+                let _ = backend.toggle_mark(id, Some(true), None).await;
             }
             Ok(format!("Marked {count} items as read."))
         });
@@ -100,12 +110,11 @@ impl App {
 
     pub(super) fn bulk_star(&mut self) {
         let ids: Vec<String> = self.selected_items.drain().collect();
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         let count = ids.len();
         self.spawn_action(true, async move {
             for id in ids {
-                // Read the current state inline since we're looping
-                let _ = crate::commands::curate::mark_core(Arc::clone(&db), id, None, Some(true), None).await;
+                let _ = backend.toggle_mark(id, None, Some(true)).await;
             }
             Ok(format!("Starred {count} items."))
         });
@@ -130,8 +139,8 @@ impl App {
                 let tags: Vec<String> = values.get(1)
                     .map(|v| v.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect())
                     .unwrap_or_default();
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::add_feed_action(db, url, tags, folder_id));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.add_feed(url, tags, folder_id).await });
             }
             InputPurpose::NewFolder { parent_id } => {
                 let name = values.first().cloned().unwrap_or_default();
@@ -139,8 +148,8 @@ impl App {
                     self.set_flash("Folder name cannot be empty.".to_string(), true);
                     return;
                 }
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::create_folder_action(db, name, parent_id));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.create_folder(name, parent_id).await });
             }
             InputPurpose::RenameFolder { folder_id } => {
                 let name = values.first().cloned().unwrap_or_default();
@@ -148,32 +157,32 @@ impl App {
                     self.set_flash("Folder name cannot be empty.".to_string(), true);
                     return;
                 }
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::rename_folder_action(db, folder_id, name));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.rename_folder(folder_id, name).await });
             }
             InputPurpose::EditNote { item_id } => {
                 let note = values.first().cloned().unwrap_or_default();
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::save_note_action(db, item_id, note));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.save_note(item_id, note).await });
             }
             InputPurpose::CreateBoard => {
                 let name = values.first().cloned().unwrap_or_default();
                 if name.is_empty() { self.set_flash("Board name cannot be empty.".into(), true); return; }
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::create_board_action(db, name));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.create_board(name).await });
             }
             InputPurpose::ImportOpml => {
                 let path = values.first().cloned().unwrap_or_default();
                 if path.is_empty() { self.set_flash("File path cannot be empty.".into(), true); return; }
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::import_opml_action(db, path));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.import_opml(path).await });
             }
             InputPurpose::CreateWatch => {
                 let name = values.first().cloned().unwrap_or_default();
                 let query = values.get(1).cloned().unwrap_or_default();
                 if name.is_empty() || query.is_empty() { self.set_flash("Name and query required.".into(), true); return; }
-                let db = Arc::clone(&self.db);
-                self.spawn_action(true, data::create_watch_action(db, name, query));
+                let backend = Arc::clone(&self.backend);
+                self.spawn_action(true, async move { backend.create_watch(name, query).await });
             }
         }
     }
@@ -183,14 +192,14 @@ impl App {
 
         match modal.purpose {
             PickerPurpose::MoveFeed { feed_id } => {
-                let db = Arc::clone(&self.db);
+                let backend = Arc::clone(&self.backend);
                 let folder_id = choice.folder_id.clone();
-                self.spawn_action(true, data::move_feed_action(db, feed_id, folder_id));
+                self.spawn_action(true, async move { backend.move_feed(feed_id, folder_id).await });
             }
             PickerPurpose::MoveFolder { folder_id } => {
-                let db = Arc::clone(&self.db);
+                let backend = Arc::clone(&self.backend);
                 let parent_id = choice.folder_id.clone();
-                self.spawn_action(true, data::move_folder_action(db, folder_id, parent_id));
+                self.spawn_action(true, async move { backend.move_folder(folder_id, parent_id).await });
             }
             PickerPurpose::FilterByTag => {
                 if choice.label == "(clear filter)" {
@@ -226,37 +235,37 @@ impl App {
                     "JSON" => ("json", "JSON"),
                     _ => ("txt", "Text"),
                 };
-                let db = Arc::clone(&self.db);
+                let backend = Arc::clone(&self.backend);
                 let ext = ext.to_string();
                 let format_name = format_name.to_string();
-                self.spawn_action(false, helpers::export_item_to_file(db, item_id, ext, format_name));
+                self.spawn_action(false, helpers::export_item_to_file(backend, item_id, ext, format_name));
             }
             PickerPurpose::AddToBoard { item_id } => {
                 if let Some(board_id) = choice.folder_id.clone() {
-                    let db = Arc::clone(&self.db);
-                    self.spawn_action(true, data::add_to_board_action(db, board_id, item_id));
+                    let backend = Arc::clone(&self.backend);
+                    self.spawn_action(true, async move { backend.add_to_board(board_id, item_id).await });
                 }
             }
         }
     }
 
     pub(super) fn submit_confirm_modal(&mut self, modal: ConfirmModal) {
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         match modal.action {
             ConfirmAction::DeleteFeed { feed_id } => {
-                self.spawn_action(true, data::remove_feed_action(db, feed_id));
+                self.spawn_action(true, async move { backend.remove_feed(feed_id).await });
             }
             ConfirmAction::DeleteFolder { folder_id, recursive } => {
-                self.spawn_action(true, data::delete_folder_action(db, folder_id, recursive));
+                self.spawn_action(true, async move { backend.delete_folder(folder_id, recursive).await });
             }
             ConfirmAction::MarkAllRead { scope, scope_id } => {
-                self.spawn_action(true, data::mark_all_read_action(db, scope, scope_id));
+                self.spawn_action(true, async move { backend.mark_all_read(scope, scope_id).await });
             }
             ConfirmAction::DeleteBoard { board_id } => {
-                self.spawn_action(true, data::delete_board_action(db, board_id));
+                self.spawn_action(true, async move { backend.delete_board(board_id).await });
             }
             ConfirmAction::DeleteWatch { watch_id } => {
-                self.spawn_action(true, data::delete_watch_action(db, watch_id));
+                self.spawn_action(true, async move { backend.delete_watch(watch_id).await });
             }
         }
     }

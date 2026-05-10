@@ -1,8 +1,8 @@
 use super::*;
 impl App {
-    pub(super) fn new(db: Arc<Database<'static>>, tx: Sender<AppMessage>, rx: Receiver<AppMessage>, theme: theme::Theme) -> Self {
+    pub(super) fn new(backend: Arc<Backend>, tx: Sender<AppMessage>, rx: Receiver<AppMessage>, theme: theme::Theme) -> Self {
         Self {
-            db,
+            backend,
             tx,
             rx,
             data: None,
@@ -77,10 +77,10 @@ impl App {
         }
 
         self.refreshing = true;
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let result = data::load_browser_data(db)
+            let result = data::load_browser_data(backend)
                 .await
                 .map_err(|err| format!("{err:#}"));
             let _ = tx.send(AppMessage::DataLoaded(result));
@@ -99,10 +99,10 @@ impl App {
         }
 
         self.last_auto_sync = Instant::now();
-        let db = Arc::clone(&self.db);
+        let backend = Arc::clone(&self.backend);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            data::run_sync_task(db, feed_id, tx).await;
+            data::run_sync_task(backend, feed_id, tx).await;
         });
     }
 

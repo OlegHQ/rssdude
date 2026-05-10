@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use chrono::Utc;
 use native_db::Database;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::spawn_blocking;
 
 use crate::shared::config::RetentionConfig;
@@ -19,7 +19,7 @@ use crate::shared::output::*;
 /// Callback type for sync progress: (completed, total, &result, total_new_so_far).
 pub type SyncProgressCb = Box<dyn Fn(usize, usize, &SyncFeedResult, usize) + Send + Sync>;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SyncFeedResult {
     pub feed: String,
     pub title: String,
@@ -29,7 +29,7 @@ pub struct SyncFeedResult {
     pub error: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SyncResult {
     pub feeds_synced: usize,
     pub new_items: usize,

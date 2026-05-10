@@ -5,6 +5,13 @@ use native_db::Database;
 use tokio::task::spawn_blocking;
 use crate::shared::db::*;
 
+pub async fn list_core(db: Arc<Database<'static>>) -> Result<Vec<SavedSearch>> {
+    spawn_blocking(move || -> Result<Vec<SavedSearch>> {
+        let r = db.r_transaction()?;
+        Ok(r.scan().primary()?.all()?.filter_map(|s| s.ok()).collect())
+    }).await?
+}
+
 pub async fn create_core(db: Arc<Database<'static>>, name: String, query: String) -> Result<SavedSearch> {
     let ss = SavedSearch {
         id: gen_id(),

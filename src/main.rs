@@ -226,6 +226,19 @@ async fn main() {
                 std::process::exit(1);
             }
         };
+        // No subcommand → launch the TUI against the remote server.
+        if cli.command.is_none() {
+            if json {
+                eprintln!("error: --json requires a subcommand");
+                std::process::exit(1);
+            }
+            let backend = std::sync::Arc::new(tui::Backend::Remote(std::sync::Arc::new(remote_client)));
+            if let Err(e) = tui::run(backend).await {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         let result = dispatch_remote(remote_client, cli.command, json).await;
         if let Err(e) = result {
             eprintln!("error: {e:#}");
@@ -248,7 +261,8 @@ async fn main() {
             if json {
                 Err(anyhow::anyhow!("--json requires a subcommand"))
             } else {
-                tui::run(db).await
+                let backend = std::sync::Arc::new(tui::Backend::Local(db));
+                tui::run(backend).await
             }
         }
         Some(Command::Serve { .. }) => unreachable!(),
@@ -340,15 +354,12 @@ async fn main() {
 /// Dispatch commands to the remote server via HTTP client.
 async fn dispatch_remote(c: net::client::Client, command: Option<Command>, json: bool) -> Result<()> {
     match command {
-        None => {
-            // TUI in client mode not yet supported
-            anyhow::bail!("TUI mode is not supported in client mode. Use CLI commands or run standalone.")
-        }
+        None => unreachable!("None handled in main as TUI launch"),
         Some(Command::Serve { .. }) => unreachable!(),
         Some(Command::Add { url, tag, folder }) => c.add_feed(json, url, tag, folder).await,
         Some(Command::List { tag }) => c.list_feeds(json, tag).await,
         Some(Command::Remove { id, yes }) => c.remove_feed(json, id, yes).await,
-        Some(Command::MoveFeed { id, folder }) => c.move_feed(json, id, folder).await,
+        Some(Command::MoveFeed { id, folder }) => c.move_feed(json, id, Some(folder)).await,
         Some(Command::Sync { feed }) => c.sync(json, feed).await,
         Some(Command::Status) => c.status(json).await,
         Some(Command::Items {
