@@ -28,7 +28,7 @@ crossterm = "0.28"
 toml = "0.8"
 axum = "0.8"
 opml = "1.1"
-readability = "0.3"
+readability = { version = "0.3", default-features = false }
 urlencoding = "2"
 tabled = "0.17"
 linkify = "0.10"
