@@ -5,6 +5,18 @@ name = "rssdude"
 version = "0.0.1"
 
 [[packages]]
+module = "github.com/anthropics/skills/skills/skill-creator"
+direct = true
+kind = "skill"
+url = "https://github.com/anthropics/skills/tree/f458cee31a7577a47ba0c9a101976fa599385174/skills/skill-creator"
+owner = "anthropics"
+repo = "skills"
+path = "skills/skill-creator"
+commit = "f458cee31a7577a47ba0c9a101976fa599385174"
+cache_key = "72596b77578a749767035fc125ca88b15f2c1e463c5efd5688f525900d82441b"
+name = ""
+
+[[packages]]
 module = "github.com/oleghq/agent-configs/plugins/rust-dev"
 direct = true
 kind = "plugin"
