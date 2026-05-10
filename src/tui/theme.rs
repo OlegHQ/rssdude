@@ -33,15 +33,15 @@ impl Theme {
 
     pub fn light() -> Self {
         Theme {
-            fg: Color::Rgb(26, 26, 46),
-            fg_dim: Color::Rgb(102, 102, 128),
-            fg_faint: Color::Rgb(160, 160, 176),
+            fg: Color::Rgb(15, 23, 42),
+            fg_dim: Color::Rgb(71, 85, 105),
+            fg_faint: Color::Rgb(100, 116, 139),
             accent: Color::Rgb(67, 56, 202),
             accent_secondary: Color::Rgb(5, 150, 105),
-            border: Color::Rgb(209, 213, 219),
+            border: Color::Rgb(148, 163, 184),
             border_focus: Color::Rgb(67, 56, 202),
             status_bg_1: Color::Rgb(67, 56, 202),
-            status_bg_2: Color::Rgb(229, 231, 235),
+            status_bg_2: Color::Rgb(71, 85, 105),
             status_bg_3: Color::Rgb(55, 48, 163),
             status_fg: Color::Rgb(255, 253, 245),
         }

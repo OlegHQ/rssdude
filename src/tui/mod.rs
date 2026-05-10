@@ -366,10 +366,10 @@ impl App {
             if flash.at.elapsed() <= FLASH_TTL {
                 format!(" {} ", flash.text)
             } else {
-                String::new()
+                " press ? for help ".to_string()
             }
         } else {
-            String::new()
+            " press ? for help ".to_string()
         };
 
         let segments = vec![
