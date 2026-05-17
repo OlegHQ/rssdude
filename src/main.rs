@@ -217,16 +217,31 @@ async fn main() {
         return;
     }
 
-    // If config has a remote server address, use client mode
-    if config.has_remote() {
-        let remote_client = match net::client::Client::from_config(&config) {
-            Ok(c) => c,
+    // Decide whether to run in client mode:
+    //   1. explicit config.server.address wins (honors any configured token)
+    //   2. else, if a local service left a runtime file AND it is reachable, use it
+    //   3. else, open the DB directly
+    let remote_client = if config.has_remote() {
+        match net::client::Client::from_config(&config) {
+            Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("error: {e:#}");
                 std::process::exit(1);
             }
-        };
-        // No subcommand → launch the TUI against the remote server.
+        }
+    } else if let Some(info) = shared::runtime::load() {
+        if shared::runtime::is_reachable(&info.address).await {
+            Some(net::client::Client::from_address(&info.address, None))
+        } else {
+            shared::runtime::clear();
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(remote_client) = remote_client {
+        // No subcommand → launch the TUI against the server.
         if cli.command.is_none() {
             if json {
                 eprintln!("error: --json requires a subcommand");

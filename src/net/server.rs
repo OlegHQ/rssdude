@@ -105,8 +105,32 @@ pub async fn serve(db: Arc<Database<'static>>, bind: String, token: Option<Strin
     let app = router(db, token);
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     eprintln!("rssdude server listening on {bind}");
-    axum::serve(listener, app).await?;
+    let _guard = crate::shared::runtime::write(&bind)?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
 }
 
 // ---------------------------------------------------------------------------

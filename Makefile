@@ -9,7 +9,10 @@ ifeq ($(UNAME_S),Darwin)
   export LIBRARY_PATH := $(LIBICONV)$(if $(LIBRARY_PATH),:$(LIBRARY_PATH))
 endif
 
-.PHONY: build install uninstall release run check clippy test fmt clean
+SERVICE := rssdude
+BIND    ?= 0.0.0.0:8484
+
+.PHONY: build install uninstall release run check clippy test fmt clean up down restart status logs reinstall-service
 
 build:
 	cargo build --release
@@ -42,3 +45,29 @@ fmt:
 
 clean:
 	cargo clean
+
+# --- service management via smdctl -----------------------------------------
+# Idempotent: starts the service if already registered, otherwise creates it.
+# Override the bind address with: make up BIND=127.0.0.1:8484
+
+up: install
+	@smdctl status $(SERVICE) >/dev/null 2>&1 \
+		&& smdctl start $(SERVICE) \
+		|| smdctl run $(SERVICE) -description "rssdude RSS feed server" \
+			-restart always -- $(BIN) serve --bind $(BIND)
+
+down:
+	smdctl stop $(SERVICE)
+
+restart:
+	smdctl restart $(SERVICE)
+
+status:
+	smdctl status $(SERVICE)
+
+logs:
+	smdctl logs -f $(SERVICE)
+
+reinstall-service:
+	-smdctl rm -f $(SERVICE)
+	$(MAKE) up

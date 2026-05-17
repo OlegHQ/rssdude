@@ -26,6 +26,15 @@ impl Client {
         })
     }
 
+    pub fn from_address(address: &str, token: Option<String>) -> Self {
+        let base_url = if address.starts_with("http://") || address.starts_with("https://") {
+            address.to_string()
+        } else {
+            format!("http://{address}")
+        };
+        Self { base_url, token, http: reqwest::Client::new() }
+    }
+
     fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)
     }
